@@ -1,0 +1,34 @@
+{
+  "moduleKey": "stir",
+  "schemaVersion": 1,
+  "sourceType": "IDAX_MODULE",
+  "permissions": [
+    {
+      "actionKey": "read",
+      "apiPath": "/api/stir/tenants/{tenantId}/listings",
+      "code": "stir.listings.read",
+      "description": "read STIR listings",
+      "fieldKey": null,
+      "labelKey": "stir.permissions.read",
+      "resourceKey": "stir.listings"
+    },
+    {
+      "actionKey": "create",
+      "apiPath": "/api/stir/tenants/{tenantId}/listings",
+      "code": "stir.listings.create",
+      "description": "create STIR listings",
+      "fieldKey": null,
+      "labelKey": "stir.permissions.create",
+      "resourceKey": "stir.listings"
+    },
+    {
+      "actionKey": "update",
+      "apiPath": "/api/stir/tenants/{tenantId}/listings",
+      "code": "stir.listings.update",
+      "description": "update STIR listings",
+      "fieldKey": null,
+      "labelKey": "stir.permissions.update",
+      "resourceKey": "stir.listings"
+    }
+  ]
+}

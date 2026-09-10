@@ -1,0 +1,20 @@
+spring:
+  config.import: optional:configtree:/run/secrets/
+  application.name: stir-backend
+  datasource:
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/idax}
+    username: ${DATABASE_USER:idax_backend}
+    password: ${DATABASE_PASSWORD:${runtime_password:}}
+  flyway.enabled: false
+  jpa:
+    open-in-view: false
+    hibernate.ddl-auto: validate
+  jackson.deserialization.fail-on-unknown-properties: true
+server.port: ${STIR_PORT:8096}
+management.endpoints.web.exposure.include: health,info
+management.endpoint.health.probes.enabled: true
+idax:
+  auth:
+    mode: LOCAL
+    token-validator: local
+    local.public-key-location: ${JWT_PUBLIC_KEY:file:/run/secrets/jwt_public_key}
