@@ -29,6 +29,60 @@
       "fieldKey": null,
       "labelKey": "stir.permissions.update",
       "resourceKey": "stir.listings"
+    },
+    {
+      "actionKey": "read",
+      "apiPath": "/api/stir/tenants/{tenantId}/participants",
+      "code": "stir.participants.read",
+      "description": "read STIR participant profiles",
+      "fieldKey": null,
+      "labelKey": "stir.permissions.participantsRead",
+      "resourceKey": "stir.participants"
+    },
+    {
+      "actionKey": "update",
+      "apiPath": "/api/stir/tenants/{tenantId}/participants/me",
+      "code": "stir.participants.update",
+      "description": "update own STIR participant profile",
+      "fieldKey": null,
+      "labelKey": "stir.permissions.participantsUpdate",
+      "resourceKey": "stir.participants"
+    },
+    {
+      "actionKey": "read",
+      "apiPath": "/api/stir/tenants/{tenantId}/negotiations",
+      "code": "stir.negotiations.read",
+      "description": "read STIR negotiations",
+      "fieldKey": null,
+      "labelKey": "stir.permissions.negotiationsRead",
+      "resourceKey": "stir.negotiations"
+    },
+    {
+      "actionKey": "create",
+      "apiPath": "/api/stir/tenants/{tenantId}/listings/{listingId}/offers",
+      "code": "stir.negotiations.create",
+      "description": "open a STIR negotiation with an offer",
+      "fieldKey": null,
+      "labelKey": "stir.permissions.negotiationsCreate",
+      "resourceKey": "stir.negotiations"
+    },
+    {
+      "actionKey": "update",
+      "apiPath": "/api/stir/tenants/{tenantId}/negotiations",
+      "code": "stir.negotiations.update",
+      "description": "counter, accept or decline a STIR negotiation",
+      "fieldKey": null,
+      "labelKey": "stir.permissions.negotiationsUpdate",
+      "resourceKey": "stir.negotiations"
+    },
+    {
+      "actionKey": "read",
+      "apiPath": "/api/stir/tenants/{tenantId}/agreements",
+      "code": "stir.agreements.read",
+      "description": "read STIR agreements",
+      "fieldKey": null,
+      "labelKey": "stir.permissions.agreementsRead",
+      "resourceKey": "stir.agreements"
     }
   ]
 }

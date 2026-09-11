@@ -22,7 +22,7 @@ public class ListingController {
             throw new org.springframework.security.access.AccessDeniedException("Tenant context mismatch");
     }
     @GetMapping @PreAuthorize("@permissionService.hasPermission('stir.listings.read')")
-    public Page<Listing> search(@AuthenticationPrincipal CurrentUser user,
+    public Page<ListingView> search(@AuthenticationPrincipal CurrentUser user,
         @RequestParam(required=false) @Size(max=160) String q,
         @RequestParam(required=false) @Pattern(regexp="OFFER|WANTED") String direction,
         @RequestParam(required=false) @Size(max=40) String category,
@@ -36,7 +36,7 @@ public class ListingController {
     @GetMapping("/catalogs") @PreAuthorize("@permissionService.hasPermission('stir.listings.read')")
     public Map<String,List<String>> catalogs() { return service.catalogs(); }
     @GetMapping("/{id}") @PreAuthorize("@permissionService.hasPermission('stir.listings.read')")
-    public Listing read(@PathVariable UUID id) { return service.read(id); }
+    public ListingView read(@PathVariable UUID id) { return service.read(id); }
     @PostMapping @ResponseStatus(CREATED) @PreAuthorize("@permissionService.hasPermission('stir.listings.create')")
     public Listing create(@AuthenticationPrincipal CurrentUser user,@Valid @RequestBody ListingRequest request) { return service.create(user,request); }
     @PutMapping("/{id}") @PreAuthorize("@permissionService.hasPermission('stir.listings.update')")

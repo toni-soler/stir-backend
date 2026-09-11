@@ -4,6 +4,7 @@ import es.idynamicsax.idax.security.CurrentUser;
 import es.idynamicsax.idax.tenant.TenantContext;
 import java.time.Instant;
 import java.util.*;
+import java.util.stream.Collectors;
 import org.springframework.data.domain.*;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -11,13 +12,17 @@ import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
+import org.stir.participant.ParticipantProfileRepository;
 import static org.springframework.http.HttpStatus.*;
 
 @Service @Transactional
 public class ListingService {
     private final ListingRepository listings;
     private final JdbcTemplate jdbc;
-    public ListingService(ListingRepository listings, JdbcTemplate jdbc) { this.listings=listings; this.jdbc=jdbc; }
+    private final ParticipantProfileRepository profiles;
+    public ListingService(ListingRepository listings, JdbcTemplate jdbc, ParticipantProfileRepository profiles) {
+        this.listings=listings; this.jdbc=jdbc; this.profiles=profiles;
+    }
 
     private UUID tenant() {
         var context=TenantContext.get();
@@ -32,10 +37,14 @@ public class ListingService {
         return Map.of("categories",jdbc.queryForList("select code from stir.category order by code",String.class),
             "resourceKinds",jdbc.queryForList("select code from stir.resource_kind order by code",String.class));
     }
-    public Listing read(UUID id) {
+    private Listing entity(UUID id) {
         return listings.findByIdAndTenantId(id,tenant()).orElseThrow(()->new ResponseStatusException(NOT_FOUND,"Listing not found"));
     }
-    public Page<Listing> search(CurrentUser user, String q, String direction, String category, String resourceKind, String status, boolean mine, int page, int size) {
+    public ListingView read(UUID id) {
+        var listing=entity(id);
+        return ListingView.of(listing,displayNames(List.of(listing.ownerId)).get(listing.ownerId));
+    }
+    public Page<ListingView> search(CurrentUser user, String q, String direction, String category, String resourceKind, String status, boolean mine, int page, int size) {
         UUID tenant=tenant();
         Specification<Listing> spec=(r,c,b)->b.equal(r.get("tenantId"),tenant);
         if(mine) { UUID owner=owner(user); spec=spec.and((r,c,b)->b.equal(r.get("ownerId"),owner)); }
@@ -46,7 +55,13 @@ public class ListingService {
             String pattern="%"+q.toLowerCase(Locale.ROOT).replace("\\","\\\\").replace("%","\\%").replace("_","\\_")+"%";
             spec=spec.and((r,c,b)->b.or(b.like(b.lower(r.get("title")),pattern,'\\'),b.like(b.lower(r.get("description")),pattern,'\\')));
         }
-        return listings.findAll(spec,PageRequest.of(page,size,Sort.by(Sort.Order.desc("createdAt"),Sort.Order.asc("id"))));
+        var result=listings.findAll(spec,PageRequest.of(page,size,Sort.by(Sort.Order.desc("createdAt"),Sort.Order.asc("id"))));
+        var names=displayNames(result.getContent().stream().map(row->row.ownerId).toList());
+        return result.map(row->ListingView.of(row,names.get(row.ownerId)));
+    }
+    private Map<UUID,String> displayNames(Collection<UUID> ownerIds) {
+        return profiles.findByTenantIdAndUserIdIn(tenant(),ownerIds).stream()
+            .collect(Collectors.toMap(profile->profile.userId,profile->profile.displayName));
     }
     public Listing create(CurrentUser user, ListingRequest request) {
         if(request.version()!=null) throw new ResponseStatusException(BAD_REQUEST,"Version is assigned by server");
@@ -65,7 +80,7 @@ public class ListingService {
         checkVersion(listing,version); listing.status="CLOSED"; listing.updatedAt=Instant.now(); return listings.saveAndFlush(listing);
     }
     private Listing owned(UUID id, CurrentUser user) {
-        var listing=read(id);
+        var listing=entity(id);
         if(!listing.ownerId.equals(owner(user))) throw new AccessDeniedException("Only the owner may change this listing");
         return listing;
     }
