@@ -1,29 +1,32 @@
 package org.stir.negotiation;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.io.UncheckedIOException;
-import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Map;
-import java.util.TreeMap;
+import org.erdtman.jcs.JsonCanonicalizer;
 
 /**
- * Minimal canonical JSON for STIR's own fixed, code-controlled AgreementSnapshot schema: sorted
- * keys, compact separators, UTF-8, no floating-point ambiguity (all numeric fields are pre-
- * formatted as decimal strings by the caller). This is not a general-purpose JCS/RFC 8785
- * implementation for arbitrary third-party JSON; STIR does not need one for a flat, versioned,
- * internally-defined object. Same field values always produce the same bytes and the same digest.
+ * RFC 8785 JSON Canonicalization Scheme (JCS) for STIR's AgreementSnapshot, format
+ * "STIR-AGREEMENT-JCS-1". Uses the same public {@code io.github.erdtman:java-json-canonicalization}
+ * library osTRIS itself uses for its own normative AuthorizationPayload canonical bytes
+ * (es.idynamicsax.ostris.core.OstrisWireCodec) - both are proven RFC 8785, not two independent
+ * hand-rolled implementations that might silently disagree on locale, whitespace, number
+ * formatting or Jackson-specific behavior. See CanonicalJsonTest for the shared Java/JavaScript
+ * test vectors (js counterpart: stir-frontend's "canonicalize" package, also cross-verified
+ * against this same erdtman library by osTRIS's own reference/node vector verifier).
  */
 public final class CanonicalJson {
+    public static final String FORMAT = "STIR-AGREEMENT-JCS-1";
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private CanonicalJson() {}
 
     public static byte[] canonicalBytes(Map<String, Object> fields) {
         try {
-            return MAPPER.writeValueAsBytes(new TreeMap<>(fields));
+            String json = MAPPER.writeValueAsString(fields);
+            return new JsonCanonicalizer(json).getEncodedUTF8();
         } catch (Exception e) {
-            throw new UncheckedIOException(new java.io.IOException(e));
+            throw new IllegalArgumentException("Snapshot fields are not valid I-JSON: " + e.getMessage(), e);
         }
     }
 

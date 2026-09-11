@@ -10,13 +10,15 @@ import java.util.UUID;
 import org.springframework.stereotype.Service;
 
 /**
- * Freezes the accepted commercial terms into an immutable, canonical, hashable record. This is a
- * contractual commitment source, not economic completion: no osTRIS call happens here. See
- * OSTRIS_INTEGRATION.md for the proposed downstream EXCHANGE encoding this snapshot feeds later.
+ * Freezes the accepted commercial terms into an immutable, canonical, hashable record - format
+ * "STIR-AGREEMENT-JCS-1" (real RFC 8785 JCS via CanonicalJson, not schema v1's hand-rolled sorted-
+ * key approximation). This is a contractual commitment source, not economic completion: no osTRIS
+ * call happens here, but this digest is exactly what later becomes contractualMetadataDigest on
+ * the osTRIS EXCHANGE proposal (see org.stir.economic.TradeService / OSTRIS_INTEGRATION.md).
  */
 @Service
 public class AgreementSnapshotService {
-    public static final int SCHEMA_VERSION = 1;
+    public static final int SCHEMA_VERSION = 2;
     private final AgreementSnapshotRepository snapshots;
     private final SecureRandom random = new SecureRandom();
 
@@ -41,6 +43,7 @@ public class AgreementSnapshotService {
     /** Package-visible so CanonicalJsonTest can build identical field maps without persistence. */
     static Map<String, Object> fields(Agreement agreement, Negotiation negotiation, Offer offer, String listingDirection, String nonce) {
         Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("format", CanonicalJson.FORMAT);
         fields.put("schemaVersion", SCHEMA_VERSION);
         fields.put("agreementId", agreement.id.toString());
         fields.put("negotiationId", negotiation.id.toString());
@@ -55,6 +58,10 @@ public class AgreementSnapshotService {
         fields.put("proposedAmount", offer.proposedAmount == null ? null : offer.proposedAmount.toPlainString());
         fields.put("proposedUnitRef", offer.proposedUnitRef);
         fields.put("terms", offer.terms);
+        // Explicit, unambiguous economic direction frozen at accept time (never re-derived at
+        // commit time - see NegotiationService.accept()); null on both means no economic execution.
+        fields.put("payerUserId", agreement.payerUserId == null ? null : agreement.payerUserId.toString());
+        fields.put("payeeUserId", agreement.payeeUserId == null ? null : agreement.payeeUserId.toString());
         fields.put("acceptedAt", Objects.toString(agreement.createdAt, null));
         fields.put("nonce", nonce);
         return fields;

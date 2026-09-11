@@ -113,7 +113,16 @@ public class NegotiationService {
         var agreement=new Agreement(); agreement.id=UUID.randomUUID(); agreement.tenantId=tenant;
         agreement.negotiationId=negotiation.id; agreement.listingId=negotiation.listingId; agreement.offerId=head.id;
         agreement.initiatorId=negotiation.initiatorId; agreement.ownerId=negotiation.ownerId;
-        agreement.economicPhase="AWAITING_ECONOMIC_EXECUTION"; agreement.createdAt=Instant.now();
+        if(head.proposedAmount==null) {
+            agreement.economicPhase="NOT_APPLICABLE";
+        } else {
+            // OFFER: the owner provides the resource, so the initiator (proposer) pays them.
+            // WANTED: the owner is requesting and pays whoever provides it (the initiator).
+            if("OFFER".equals(listing.direction)) { agreement.payerUserId=negotiation.initiatorId; agreement.payeeUserId=negotiation.ownerId; }
+            else { agreement.payerUserId=negotiation.ownerId; agreement.payeeUserId=negotiation.initiatorId; }
+            agreement.economicPhase="AWAITING_ECONOMIC_EXECUTION";
+        }
+        agreement.createdAt=Instant.now();
         agreement=agreements.saveAndFlush(agreement);
         var snapshot=snapshotService.freeze(agreement,negotiation,head,listing.direction);
         return AgreementDetail.of(agreement,snapshot);

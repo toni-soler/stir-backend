@@ -55,4 +55,18 @@ class CanonicalJsonTest {
         assertFalse(text.contains(": "));
         assertFalse(text.contains(", "));
     }
+    /** Shared Java/JavaScript vector (see stir-frontend/tests/canonical-json.test.mjs): the exact
+     * same field values, independently canonicalized by this module's erdtman/java-json-
+     * canonicalization and the frontend's "canonicalize" npm package, produce byte-identical JCS
+     * output and this exact digest - real interoperability, not two implementations that merely
+     * each pass their own tests. Computed with Node's canonicalize + crypto against this same
+     * baseline() map. */
+    @Test void matchesTheSharedJavaJavaScriptTestVector() {
+        var bytes=CanonicalJson.canonicalBytes(baseline());
+        assertEquals("{\"agreementId\":\"5c2c6a2e-1111-4a11-9a11-000000000001\",\"listingDirection\":\"OFFER\","
+            + "\"nonce\":\"fixed-test-nonce\",\"proposedAmount\":\"15.00\",\"quantity\":\"20.0000\","
+            + "\"schemaVersion\":1,\"terms\":null}", new String(bytes, java.nio.charset.StandardCharsets.UTF_8));
+        assertEquals("3bde73f31403a61d2c0cdcc31158207935475881981a57e6696b3b44c6dce862",
+            CanonicalJson.sha256Hex(bytes));
+    }
 }

@@ -83,6 +83,24 @@
       "fieldKey": null,
       "labelKey": "stir.permissions.agreementsRead",
       "resourceKey": "stir.agreements"
+    },
+    {
+      "actionKey": "read",
+      "apiPath": "/api/stir/tenants/{tenantId}/economic",
+      "code": "stir.economic.read",
+      "description": "read STIR economic bindings, balances and trade/exchange status",
+      "fieldKey": null,
+      "labelKey": "stir.permissions.economicRead",
+      "resourceKey": "stir.economic"
+    },
+    {
+      "actionKey": "manage",
+      "apiPath": "/api/stir/tenants/{tenantId}/economic",
+      "code": "stir.economic.manage",
+      "description": "bootstrap the marketplace economic binding, activate a participant for exchange, and drive a Trade through osTRIS (propose/authorize/commit/sync)",
+      "fieldKey": null,
+      "labelKey": "stir.permissions.economicManage",
+      "resourceKey": "stir.economic"
     }
   ]
 }
