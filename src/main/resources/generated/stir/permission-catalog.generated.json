@@ -101,6 +101,33 @@
       "fieldKey": null,
       "labelKey": "stir.permissions.economicManage",
       "resourceKey": "stir.economic"
+    },
+    {
+      "actionKey": "read",
+      "apiPath": "/api/stir/tenants/{tenantId}/notifications",
+      "code": "stir.notifications.read",
+      "description": "read own STIR in-app notifications",
+      "fieldKey": null,
+      "labelKey": "stir.permissions.notificationsRead",
+      "resourceKey": "stir.notifications"
+    },
+    {
+      "actionKey": "create",
+      "apiPath": "/api/stir/tenants/{tenantId}/reports",
+      "code": "stir.content.report",
+      "description": "report a STIR listing or profile for moderation review",
+      "fieldKey": null,
+      "labelKey": "stir.permissions.contentReport",
+      "resourceKey": "stir.content"
+    },
+    {
+      "actionKey": "manage",
+      "apiPath": "/api/stir/tenants/{tenantId}/moderation/**",
+      "code": "stir.moderation.manage",
+      "description": "review reports and hide/restore STIR listings",
+      "fieldKey": null,
+      "labelKey": "stir.permissions.moderationManage",
+      "resourceKey": "stir.moderation"
     }
   ]
 }

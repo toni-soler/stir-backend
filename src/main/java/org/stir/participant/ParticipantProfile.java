@@ -12,6 +12,7 @@ public class ParticipantProfile {
     @Column(name="display_name", nullable=false, length=80) public String displayName;
     @Column(length=500) public String bio;
     @Column(length=160) public String location;
+    @Column(name="avatar_attachment_id") public UUID avatarAttachmentId;
     @Column(nullable=false) public boolean active;
     @Version public long version;
     @Column(name="created_at", nullable=false) public Instant createdAt;

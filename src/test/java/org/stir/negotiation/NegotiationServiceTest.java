@@ -10,6 +10,7 @@ import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.server.ResponseStatusException;
 import org.stir.listing.Listing;
 import org.stir.listing.ListingRepository;
+import org.stir.notification.NotificationService;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
@@ -33,7 +34,7 @@ class NegotiationServiceTest {
         agreementRepository=mock(AgreementRepository.class);
         snapshotRepository=mock(AgreementSnapshotRepository.class);
         service=new NegotiationService(negotiationRepository,offerRepository,agreementRepository,listingRepository,
-            new AgreementSnapshotService(snapshotRepository));
+            new AgreementSnapshotService(snapshotRepository), mock(NotificationService.class));
 
         listing=new Listing(); listing.id=UUID.randomUUID(); listing.tenantId=tenant; listing.ownerId=owner;
         listing.status="ACTIVE"; listing.direction="OFFER"; listing.version=0;

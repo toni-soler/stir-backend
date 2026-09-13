@@ -35,6 +35,11 @@ public class OstrisClient {
             return client.get().uri(uri).header("Authorization", currentAuthorizationHeader()).retrieve().body(type);
         } catch (org.springframework.web.client.RestClientResponseException ex) { throw StirOstrisException.from(ex); }
     }
+    private <T> List<T> getList(String uri, org.springframework.core.ParameterizedTypeReference<List<T>> type) {
+        try {
+            return client.get().uri(uri).header("Authorization", currentAuthorizationHeader()).retrieve().body(type);
+        } catch (org.springframework.web.client.RestClientResponseException ex) { throw StirOstrisException.from(ex); }
+    }
     private <T> T post(String uri, Object body, Class<T> type) {
         try {
             var spec = client.post().uri(uri).header("Authorization", currentAuthorizationHeader()).contentType(org.springframework.http.MediaType.APPLICATION_JSON);
@@ -76,6 +81,20 @@ public class OstrisClient {
         return post("/api/ostris/transactions/" + transactionId + "/commit", null, CommitReceipt.class);
     }
 
+    // --- Device lifecycle: add/revoke a credential for the caller's ALREADY-ACTIVE controller,
+    // never a new controller - see osTRIS's ProvisioningService.addCredential/revokeCredential. ---
+    public CredentialAdded addCredential(UUID community, UUID controllerId, String publicKeyBase64url) {
+        return post("/api/ostris/communities/" + community + "/credentials",
+            Map.of("controllerId", controllerId.toString(), "publicKeyBase64url", publicKeyBase64url), CredentialAdded.class);
+    }
+    public void revokeCredential(UUID community, UUID credentialId) {
+        post("/api/ostris/communities/" + community + "/credentials/" + credentialId + "/revoke", null, Void.class);
+    }
+    public List<CredentialView> credentialsForController(UUID community, UUID controllerId) {
+        return getList("/api/ostris/communities/" + community + "/controllers/" + controllerId + "/credentials",
+            new org.springframework.core.ParameterizedTypeReference<>() {});
+    }
+
     public record Entry(String accountId, String amount) {}
     public record CommunityCreated(UUID communityId) {}
     public record UnitCreated(UUID unitId, String code, int scale) {}
@@ -88,4 +107,6 @@ public class OstrisClient {
     public record TransactionStatus(UUID transactionId, UUID communityId, UUID unitId, String purpose, String wireFormat,
         String ostrisCoreVersion, String authorizationPayload, String authorizationDigest, String status,
         Long committedSequence, String protocolDigest, java.time.Instant committedAt, List<UUID> authorizedAccountIds) {}
+    public record CredentialAdded(UUID credentialId, UUID controllerId, long activationSequence) {}
+    public record CredentialView(UUID credentialId, String publicKeyBase64url, String algorithm, long activationSequence, Long revocationSequence, UUID controllerId) {}
 }

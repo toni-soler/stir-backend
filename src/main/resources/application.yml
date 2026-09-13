@@ -10,10 +10,16 @@ spring:
     open-in-view: false
     hibernate.ddl-auto: validate
   jackson.deserialization.fail-on-unknown-properties: true
+  servlet:
+    multipart:
+      max-file-size: 8MB
+      max-request-size: 10MB
 server.port: ${STIR_PORT:8096}
 server.error.include-message: always
+server.forward-headers-strategy: framework
 management.endpoints.web.exposure.include: health,info
 management.endpoint.health.probes.enabled: true
+logging.pattern.console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{requestId}] %logger{36} - %msg%n"
 idax:
   auth:
     mode: LOCAL
@@ -21,3 +27,17 @@ idax:
     local.public-key-location: ${JWT_PUBLIC_KEY:file:/run/secrets/jwt_public_key}
 ostris:
   base-url: ${OSTRIS_BASE_URL:http://ostris:8095}
+storage:
+  endpoint: ${STORAGE_ENDPOINT:http://minio:9000}
+  access-key: ${STORAGE_ACCESS_KEY:${storage_access_key:}}
+  secret-key: ${STORAGE_SECRET_KEY:${storage_secret_key:}}
+  bucket: ${STORAGE_BUCKET:stir-attachments}
+stir:
+  instance:
+    site-name: ${STIR_SITE_NAME:STIR}
+    public-base-url: ${STIR_PUBLIC_BASE_URL:http://localhost:8089}
+    support-contact: ${STIR_SUPPORT_CONTACT:}
+    default-locale: ${STIR_DEFAULT_LOCALE:en}
+    available-locales: ${STIR_AVAILABLE_LOCALES:en,es,ca,de,fr,it,pt,ja,eu,gl,pt-BR,zh}
+    marketplace-description: ${STIR_MARKETPLACE_DESCRIPTION:}
+    logo-url: ${STIR_LOGO_URL:}

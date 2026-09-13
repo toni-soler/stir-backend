@@ -9,6 +9,7 @@ import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
+import org.stir.ratelimit.RateLimited;
 import static org.springframework.http.HttpStatus.CREATED;
 
 @RestController @RequestMapping("/api/stir/tenants/{tenantId}/listings") @Validated
@@ -38,6 +39,7 @@ public class ListingController {
     @GetMapping("/{id}") @PreAuthorize("@permissionService.hasPermission('stir.listings.read')")
     public ListingView read(@PathVariable UUID id) { return service.read(id); }
     @PostMapping @ResponseStatus(CREATED) @PreAuthorize("@permissionService.hasPermission('stir.listings.create')")
+    @RateLimited(key = "createListing", limit = 20, windowSeconds = 300)
     public Listing create(@AuthenticationPrincipal CurrentUser user,@Valid @RequestBody ListingRequest request) { return service.create(user,request); }
     @PutMapping("/{id}") @PreAuthorize("@permissionService.hasPermission('stir.listings.update')")
     public Listing update(@PathVariable UUID id,@AuthenticationPrincipal CurrentUser user,@Valid @RequestBody ListingRequest request) { return service.update(id,user,request); }

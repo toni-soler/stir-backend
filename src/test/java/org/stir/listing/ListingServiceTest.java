@@ -7,6 +7,7 @@ import org.junit.jupiter.api.*;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.server.ResponseStatusException;
+import org.stir.attachment.AttachmentRepository;
 import org.stir.participant.ParticipantProfileRepository;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -18,7 +19,9 @@ class ListingServiceTest {
         repository=mock(ListingRepository.class); var jdbc=mock(JdbcTemplate.class);
         var profiles=mock(ParticipantProfileRepository.class);
         when(profiles.findByTenantIdAndUserIdIn(any(),any())).thenReturn(List.of());
-        service=new ListingService(repository,jdbc,profiles);
+        var attachments=mock(AttachmentRepository.class);
+        when(attachments.findByTenantIdAndListingIdInAndPositionAndStatus(any(),any(),anyShort(),any())).thenReturn(List.of());
+        service=new ListingService(repository,jdbc,profiles,attachments);
         user=mock(CurrentUser.class); when(user.getUserId()).thenReturn(owner);
         TenantContext.set(new TenantContext(tenant,null,owner,"test",TenantContext.DbRole.IDAX_APP));
         listing=new Listing();listing.id=UUID.randomUUID();listing.tenantId=tenant;listing.ownerId=owner;listing.status="ACTIVE";listing.version=2;

@@ -13,6 +13,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 import org.stir.listing.Listing;
 import org.stir.listing.ListingRepository;
+import org.stir.notification.NotificationService;
 import static org.springframework.http.HttpStatus.*;
 
 /**
@@ -27,11 +28,12 @@ public class NegotiationService {
     private final AgreementRepository agreements;
     private final ListingRepository listings;
     private final AgreementSnapshotService snapshotService;
+    private final NotificationService notifications;
 
     public NegotiationService(NegotiationRepository negotiations, OfferRepository offers, AgreementRepository agreements,
-            ListingRepository listings, AgreementSnapshotService snapshotService) {
+            ListingRepository listings, AgreementSnapshotService snapshotService, NotificationService notifications) {
         this.negotiations=negotiations; this.offers=offers; this.agreements=agreements;
-        this.listings=listings; this.snapshotService=snapshotService;
+        this.listings=listings; this.snapshotService=snapshotService; this.notifications=notifications;
     }
 
     private UUID tenant() {
@@ -79,6 +81,7 @@ public class NegotiationService {
         offer=offers.saveAndFlush(offer);
         negotiation.lastOfferId=offer.id; negotiation.updatedAt=now;
         negotiation=negotiations.saveAndFlush(negotiation);
+        notifications.create(tenant,listing.ownerId,"OFFER_RECEIVED","NEGOTIATION",negotiation.id);
         return NegotiationDetail.of(negotiation,List.of(offer),null);
     }
 
@@ -95,6 +98,8 @@ public class NegotiationService {
         next=offers.saveAndFlush(next);
         negotiation.lastOfferId=next.id; negotiation.updatedAt=Instant.now();
         negotiation=negotiations.saveAndFlush(negotiation);
+        UUID otherParty=negotiation.initiatorId.equals(actor)?negotiation.ownerId:negotiation.initiatorId;
+        notifications.create(tenant,otherParty,"COUNTEROFFER_RECEIVED","NEGOTIATION",negotiation.id);
         return NegotiationDetail.of(negotiation,offers.findByNegotiationIdOrderBySequenceNumberAsc(negotiation.id),null);
     }
 
@@ -125,6 +130,7 @@ public class NegotiationService {
         agreement.createdAt=Instant.now();
         agreement=agreements.saveAndFlush(agreement);
         var snapshot=snapshotService.freeze(agreement,negotiation,head,listing.direction);
+        notifications.create(tenant,head.authorId,"OFFER_ACCEPTED","AGREEMENT",agreement.id);
         return AgreementDetail.of(agreement,snapshot);
     }
 
@@ -135,6 +141,8 @@ public class NegotiationService {
         checkVersion(negotiation.version,expectedVersion);
         negotiation.status="DECLINED"; negotiation.updatedAt=Instant.now();
         negotiation=negotiations.saveAndFlush(negotiation);
+        UUID otherParty=negotiation.initiatorId.equals(actor)?negotiation.ownerId:negotiation.initiatorId;
+        notifications.create(tenant,otherParty,"OFFER_DECLINED","NEGOTIATION",negotiation.id);
         return NegotiationDetail.of(negotiation,offers.findByNegotiationIdOrderBySequenceNumberAsc(negotiation.id),null);
     }
 

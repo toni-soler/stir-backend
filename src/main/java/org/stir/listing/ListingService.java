@@ -12,6 +12,7 @@ import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
+import org.stir.attachment.AttachmentRepository;
 import org.stir.participant.ParticipantProfileRepository;
 import static org.springframework.http.HttpStatus.*;
 
@@ -20,8 +21,9 @@ public class ListingService {
     private final ListingRepository listings;
     private final JdbcTemplate jdbc;
     private final ParticipantProfileRepository profiles;
-    public ListingService(ListingRepository listings, JdbcTemplate jdbc, ParticipantProfileRepository profiles) {
-        this.listings=listings; this.jdbc=jdbc; this.profiles=profiles;
+    private final AttachmentRepository attachments;
+    public ListingService(ListingRepository listings, JdbcTemplate jdbc, ParticipantProfileRepository profiles, AttachmentRepository attachments) {
+        this.listings=listings; this.jdbc=jdbc; this.profiles=profiles; this.attachments=attachments;
     }
 
     private UUID tenant() {
@@ -42,12 +44,13 @@ public class ListingService {
     }
     public ListingView read(UUID id) {
         var listing=entity(id);
-        return ListingView.of(listing,displayNames(List.of(listing.ownerId)).get(listing.ownerId));
+        return ListingView.of(listing,displayNames(List.of(listing.ownerId)).get(listing.ownerId),mainPhotoIds(List.of(listing.id)).get(listing.id));
     }
     public Page<ListingView> search(CurrentUser user, String q, String direction, String category, String resourceKind, String status, boolean mine, int page, int size) {
         UUID tenant=tenant();
         Specification<Listing> spec=(r,c,b)->b.equal(r.get("tenantId"),tenant);
         if(mine) { UUID owner=owner(user); spec=spec.and((r,c,b)->b.equal(r.get("ownerId"),owner)); }
+        else { spec=spec.and((r,c,b)->b.isFalse(r.get("hiddenByModerator"))); }
         for(var filter : Map.of("direction",Objects.toString(direction,""),"category",Objects.toString(category,""),"resourceKind",Objects.toString(resourceKind,""),"status",Objects.toString(status,"")).entrySet()) {
             if(!filter.getValue().isBlank()) spec=spec.and((r,c,b)->b.equal(r.get(filter.getKey()),filter.getValue()));
         }
@@ -57,7 +60,13 @@ public class ListingService {
         }
         var result=listings.findAll(spec,PageRequest.of(page,size,Sort.by(Sort.Order.desc("createdAt"),Sort.Order.asc("id"))));
         var names=displayNames(result.getContent().stream().map(row->row.ownerId).toList());
-        return result.map(row->ListingView.of(row,names.get(row.ownerId)));
+        var mainPhotos=mainPhotoIds(result.getContent().stream().map(row->row.id).toList());
+        return result.map(row->ListingView.of(row,names.get(row.ownerId),mainPhotos.get(row.id)));
+    }
+    private Map<UUID,UUID> mainPhotoIds(Collection<UUID> listingIds) {
+        if(listingIds.isEmpty()) return Map.of();
+        return attachments.findByTenantIdAndListingIdInAndPositionAndStatus(tenant(),listingIds,(short)0,"ACTIVE").stream()
+            .collect(Collectors.toMap(a->a.listingId,a->a.id));
     }
     private Map<UUID,String> displayNames(Collection<UUID> ownerIds) {
         return profiles.findByTenantIdAndUserIdIn(tenant(),ownerIds).stream()

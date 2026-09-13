@@ -73,13 +73,21 @@ public class EconomicActivationService {
         return ParticipantEconomicView.of(binding, account);
     }
 
-    public ParticipantEconomicView activate(CurrentUser user, String publicKeyBase64url) {
+    /**
+     * Idempotent per user, NOT per device: if this tenant/user is already activated (from any
+     * device), this returns the existing profile with credentialId=null - the stored binding's
+     * credentialId belongs to whichever device activated FIRST, and would be actively misleading
+     * to hand back here as "this device's". A second device instead goes through
+     * DeviceCredentialService.addDevice() (see MyEconomicProfile's UI flow), which binds its own
+     * new credential to the SAME already-active controller.
+     */
+    public ActivationView activate(CurrentUser user, String publicKeyBase64url) {
         UUID tenant = tenant(), owner = owner(user);
         var existing = participantBindings.findByTenantIdAndUserId(tenant, owner);
-        if (existing.isPresent()) return me(user);
+        if (existing.isPresent()) return new ActivationView(me(user), null);
         var marketplace = requireMarketplaceBinding(tenant);
         var profile = profiles.findByTenantIdAndUserId(tenant, owner)
-            .orElseThrow(() -> new ResponseStatusException(CONFLICT, "Set up your marketplace profile before activating exchanges"));
+            .orElseThrow(() -> new ResponseStatusException(CONFLICT, "PROFILE_REQUIRED_BEFORE_ACTIVATION: Set up your marketplace profile before activating exchanges"));
         var result = ostris.activateParticipant(marketplace.communityId, profile.displayName, marketplace.unitId, publicKeyBase64url, null);
         var binding = new ParticipantEconomicBinding();
         binding.id = UUID.randomUUID(); binding.tenantId = tenant; binding.userId = owner;
@@ -88,7 +96,7 @@ public class EconomicActivationService {
         binding.controllerId = result.controllerId(); binding.credentialId = result.credentialId();
         binding.publicKeyBase64url = publicKeyBase64url; binding.createdAt = Instant.now();
         participantBindings.saveAndFlush(binding);
-        return me(user);
+        return new ActivationView(me(user), result.credentialId());
     }
 
     public record MarketplaceEconomicView(UUID communityId, String communityName, UUID unitId, String unitCode, int unitScale) {}
@@ -97,4 +105,9 @@ public class EconomicActivationService {
             return new ParticipantEconomicView(binding.communityId, binding.unitId, binding.accountId, account.balanceProjection(), account.creditFloor());
         }
     }
+    /** Only ever returned from activate() itself - the ONE moment a caller needs to know "this
+     * credentialId is what THIS device's key just became" (to remember it locally, see signer.js's
+     * markDeviceRegistered). me() intentionally does not expose credentialId: on a second device it
+     * would misleadingly be the FIRST device's id, not this one's. */
+    public record ActivationView(ParticipantEconomicView profile, UUID credentialId) {}
 }

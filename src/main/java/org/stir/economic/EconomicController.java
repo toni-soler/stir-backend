@@ -7,6 +7,7 @@ import java.util.UUID;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
+import org.stir.ratelimit.RateLimited;
 
 @RestController @RequestMapping("/api/stir/tenants/{tenantId}/economic")
 public class EconomicController {
@@ -31,7 +32,8 @@ public class EconomicController {
     public EconomicActivationService.ParticipantEconomicView me(@AuthenticationPrincipal CurrentUser user) { return service.me(user); }
 
     @PostMapping("/activate") @PreAuthorize("@permissionService.hasPermission('stir.economic.manage')")
-    public EconomicActivationService.ParticipantEconomicView activate(@AuthenticationPrincipal CurrentUser user, @Valid @RequestBody ActivateRequest request) {
+    @RateLimited(key = "economicActivate", limit = 5, windowSeconds = 60)
+    public EconomicActivationService.ActivationView activate(@AuthenticationPrincipal CurrentUser user, @Valid @RequestBody ActivateRequest request) {
         return service.activate(user, request.publicKeyBase64url());
     }
 

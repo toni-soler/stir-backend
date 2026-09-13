@@ -71,7 +71,8 @@ class EconomicActivationServiceTest {
         when(ostris.account(community, existing.accountId)).thenReturn(
             new OstrisClient.AccountView(existing.accountId, unit, existing.participantId, "INDIVIDUAL", "Ana", "-100000", "0", "ACTIVE"));
         var result = service.activate(currentUser, "some-public-key");
-        assertEquals(existing.accountId, result.accountId());
+        assertEquals(existing.accountId, result.profile().accountId());
+        assertNull(result.credentialId(), "a second device's activate() call must never claim the FIRST device's credentialId as its own");
         verify(ostris, never()).activateParticipant(any(), any(), any(), any(), any());
     }
     @Test void activateCallsOstrisWithTheProfileDisplayNameAndPersistsTheBinding() {
@@ -85,7 +86,8 @@ class EconomicActivationServiceTest {
         when(ostris.account(community, accountId)).thenReturn(new OstrisClient.AccountView(accountId, unit, participantId, "INDIVIDUAL", "Ana", "-100000", "0", "ACTIVE"));
 
         var result = service.activate(currentUser, "pk-bytes");
-        assertEquals(accountId, result.accountId());
+        assertEquals(accountId, result.profile().accountId());
+        assertEquals(credentialId, result.credentialId(), "the FRESH activation must return the credentialId that was just created, so the client can remember this device is registered");
         var captor = org.mockito.ArgumentCaptor.forClass(ParticipantEconomicBinding.class);
         verify(participantBindings).saveAndFlush(captor.capture());
         assertEquals(accountId, captor.getValue().accountId);

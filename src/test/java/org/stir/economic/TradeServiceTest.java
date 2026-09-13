@@ -9,6 +9,7 @@ import java.util.*;
 import org.junit.jupiter.api.*;
 import org.springframework.web.server.ResponseStatusException;
 import org.stir.negotiation.*;
+import org.stir.notification.NotificationService;
 import org.stir.participant.ParticipantProfileRepository;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -35,7 +36,7 @@ class TradeServiceTest {
         ostris = mock(OstrisClient.class);
         activation = new EconomicActivationService(marketplaceBindings, participantBindings, mock(ParticipantProfileRepository.class), ostris);
         rejectionRecorder = mock(TradeRejectionRecorder.class);
-        service = new TradeService(trades, agreements, offers, snapshots, participantBindings, activation, ostris, rejectionRecorder);
+        service = new TradeService(trades, agreements, offers, snapshots, participantBindings, activation, ostris, rejectionRecorder, mock(NotificationService.class));
 
         payerUser = mock(CurrentUser.class); when(payerUser.getUserId()).thenReturn(payer);
         payeeUser = mock(CurrentUser.class); when(payeeUser.getUserId()).thenReturn(payee);
@@ -112,12 +113,17 @@ class TradeServiceTest {
         return trade;
     }
 
-    @Test void authorizeRelaysToOstrisUsingTheCallersOwnAccountAndCredential() {
+    @Test void authorizeRelaysToOstrisUsingTheCallersOwnAccountAndTheCredentialTheCallerActuallySignedWith() {
+        // The caller's own SECOND device (a credential never stored on ParticipantEconomicBinding,
+        // which only ever remembers the FIRST device's id) must still be relayed to osTRIS exactly
+        // as the caller claims - never silently replaced by payerBinding's stored credentialId,
+        // which would make a later device's perfectly valid signature always fail osTRIS's check.
+        var secondDeviceCredential = UUID.randomUUID();
         var trade = tradeAwaitingSignatures();
         when(ostris.transaction(trade.transactionId)).thenReturn(new OstrisClient.TransactionStatus(
             trade.transactionId, community, unit, "EXCHANGE", "OSTRIS-CORE-JCS-1", "0.1", "{}", "digest", "PROPOSED", null, null, null, List.of(payerAccount)));
-        service.authorize(payerUser, agreement.id, "sig-bytes");
-        verify(ostris).authorize(trade.transactionId, payerAccount, payerCredential, "sig-bytes");
+        service.authorize(payerUser, agreement.id, secondDeviceCredential, "sig-bytes");
+        verify(ostris).authorize(trade.transactionId, payerAccount, secondDeviceCredential, "sig-bytes");
     }
     @Test void commitSuccessMarksTradeAndAgreementCommittedWithReceiptData() {
         var trade = tradeAwaitingSignatures();

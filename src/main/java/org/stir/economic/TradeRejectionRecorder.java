@@ -5,6 +5,7 @@ import java.util.UUID;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.stir.notification.NotificationService;
 
 /**
  * Records a Trade/Agreement rejection in its OWN transaction. TradeService.commit() calls this
@@ -16,9 +17,10 @@ import org.springframework.transaction.annotation.Transactional;
 public class TradeRejectionRecorder {
     private final TradeRepository trades;
     private final org.stir.negotiation.AgreementRepository agreements;
+    private final NotificationService notifications;
 
-    public TradeRejectionRecorder(TradeRepository trades, org.stir.negotiation.AgreementRepository agreements) {
-        this.trades = trades; this.agreements = agreements;
+    public TradeRejectionRecorder(TradeRepository trades, org.stir.negotiation.AgreementRepository agreements, NotificationService notifications) {
+        this.trades = trades; this.agreements = agreements; this.notifications = notifications;
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
@@ -27,5 +29,7 @@ public class TradeRejectionRecorder {
         var agreement = agreements.findByIdAndTenantId(agreementId, tenant).orElseThrow();
         trade.executionState = "REJECTED"; trade.updatedAt = Instant.now(); trades.saveAndFlush(trade);
         agreement.economicPhase = "REJECTED"; agreements.saveAndFlush(agreement);
+        notifications.create(tenant, agreement.payerUserId, "TRADE_REJECTED", "AGREEMENT", agreementId);
+        notifications.create(tenant, agreement.payeeUserId, "TRADE_REJECTED", "AGREEMENT", agreementId);
     }
 }

@@ -17,6 +17,7 @@ import org.stir.negotiation.AgreementRepository;
 import org.stir.negotiation.AgreementSnapshotRepository;
 import org.stir.negotiation.Offer;
 import org.stir.negotiation.OfferRepository;
+import org.stir.notification.NotificationService;
 import static org.springframework.http.HttpStatus.*;
 
 /**
@@ -38,14 +39,16 @@ public class TradeService {
     private final EconomicActivationService activation;
     private final OstrisClient ostris;
     private final TradeRejectionRecorder rejectionRecorder;
+    private final NotificationService notifications;
     private final SecureRandom random = new SecureRandom();
 
     public TradeService(TradeRepository trades, AgreementRepository agreements, OfferRepository offers,
             AgreementSnapshotRepository snapshots, ParticipantEconomicBindingRepository participantBindings,
-            EconomicActivationService activation, OstrisClient ostris, TradeRejectionRecorder rejectionRecorder) {
+            EconomicActivationService activation, OstrisClient ostris, TradeRejectionRecorder rejectionRecorder,
+            NotificationService notifications) {
         this.trades = trades; this.agreements = agreements; this.offers = offers; this.snapshots = snapshots;
         this.participantBindings = participantBindings; this.activation = activation; this.ostris = ostris;
-        this.rejectionRecorder = rejectionRecorder;
+        this.rejectionRecorder = rejectionRecorder; this.notifications = notifications;
     }
 
     private UUID tenant() {
@@ -119,19 +122,31 @@ public class TradeService {
 
         agreement.economicPhase = "AWAITING_SIGNATURES";
         agreements.saveAndFlush(agreement);
+        UUID counterparty = actor.equals(agreement.payerUserId) ? agreement.payeeUserId : agreement.payerUserId;
+        notifications.create(tenant, counterparty, "SIGNATURE_NEEDED", "AGREEMENT", agreementId);
         return TradeView.of(trade);
     }
 
-    public TradeView authorize(CurrentUser user, UUID agreementId, String signatureBase64url) {
+    /** credentialId names WHICH of the caller's (possibly several) devices actually produced this
+     * signature - it must come from the caller's own client, never from the stored
+     * ParticipantEconomicBinding.credentialId, which is fixed at first activation and would still
+     * point at the FIRST device (even a since-revoked one) once a second device is added. STIR
+     * never itself verifies the signature; it only relays whatever the caller claims signed to
+     * osTRIS, which is the sole authority on whether that credential's signature actually checks
+     * out and is currently eligible. */
+    public TradeView authorize(CurrentUser user, UUID agreementId, UUID credentialId, String signatureBase64url) {
         UUID tenant = tenant(), actor = actor(user);
         var agreement = partyAgreement(tenant, agreementId, actor);
         var trade = requireTrade(tenant, agreementId);
         if (!"AWAITING_SIGNATURES".equals(trade.executionState))
             throw new ResponseStatusException(CONFLICT, "This exchange is no longer awaiting signatures (" + trade.executionState + ")");
-        var binding = requireBinding(tenant, actor, "You");
+        requireBinding(tenant, actor, "You");
         UUID myAccount = actor.equals(agreement.payerUserId) ? trade.payerAccountId : trade.payeeAccountId;
-        ostris.authorize(trade.transactionId, myAccount, binding.credentialId, signatureBase64url);
-        return sync(user, agreementId);
+        ostris.authorize(trade.transactionId, myAccount, credentialId, signatureBase64url);
+        var result = sync(user, agreementId);
+        UUID counterparty = actor.equals(agreement.payerUserId) ? agreement.payeeUserId : agreement.payerUserId;
+        notifications.create(tenant, counterparty, "COUNTERPARTY_SIGNED", "AGREEMENT", agreementId);
+        return result;
     }
 
     public TradeView commit(CurrentUser user, UUID agreementId) {
@@ -154,6 +169,8 @@ public class TradeService {
             throw new ResponseStatusException(UNPROCESSABLE_ENTITY, ex.code + ": " + ex.getMessage());
         }
         trade.updatedAt = Instant.now(); trades.saveAndFlush(trade); agreements.saveAndFlush(agreement);
+        notifications.create(tenant, agreement.payerUserId, "TRADE_COMMITTED", "AGREEMENT", agreementId);
+        notifications.create(tenant, agreement.payeeUserId, "TRADE_COMMITTED", "AGREEMENT", agreementId);
         return TradeView.of(trade);
     }
 

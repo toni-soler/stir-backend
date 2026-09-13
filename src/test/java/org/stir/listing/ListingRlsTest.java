@@ -109,4 +109,36 @@ class ListingRlsTest {
             c.rollback();
         }
     }
+
+    /** Same forced tenant-equality RLS pattern, now proven for every 0.4 public-pilot table
+     * (attachments, notifications, content reports, device-credential labels). */
+    @Test void publicPilotTablesForceRlsAndIsolateTenants() throws Exception {
+        var a=UUID.randomUUID(); var b=UUID.randomUUID();
+        var owner=UUID.randomUUID(); var recipient=UUID.randomUUID(); var reporter=UUID.randomUUID();
+        var listingId=UUID.randomUUID(); var attachmentId=UUID.randomUUID(); var negotiationId=UUID.randomUUID();
+        var notificationId=UUID.randomUUID(); var reportId=UUID.randomUUID(); var deviceId=UUID.randomUUID();
+        try(var c=DriverManager.getConnection(db.getJdbcUrl(),db.getUsername(),db.getPassword());var s=c.createStatement()){
+            c.setAutoCommit(false);
+            s.execute("SET LOCAL ROLE idax_app");
+            s.execute("SELECT set_config('app.tenant_id','"+a+"',true)");
+            s.execute("INSERT INTO stir.listing VALUES ('"+listingId+"','"+a+"','"+owner+"','OFFER','Chair','Wood','general','physical',NULL,'ACTIVE',0,now(),now())");
+            s.execute("INSERT INTO stir.attachment VALUES ('"+attachmentId+"','"+a+"','"+owner+"','LISTING_PHOTO','"+listingId+"',0,'tenants/"+a+"/listing_photo/x.jpg','image/jpeg',1000,'ACTIVE',now(),now())");
+            s.execute("INSERT INTO stir.negotiation(id,tenant_id,listing_id,initiator_id,owner_id,status,version,created_at,updated_at)"
+                +" VALUES ('"+negotiationId+"','"+a+"','"+listingId+"','"+recipient+"','"+owner+"','OPEN',0,now(),now())");
+            s.execute("INSERT INTO stir.notification VALUES ('"+notificationId+"','"+a+"','"+recipient+"','OFFER_RECEIVED','NEGOTIATION','"+negotiationId+"',NULL,now())");
+            s.execute("INSERT INTO stir.content_report VALUES ('"+reportId+"','"+a+"','"+reporter+"','LISTING','"+listingId+"','Spam','OPEN',now(),NULL,NULL)");
+            s.execute("INSERT INTO stir.participant_device_credential VALUES ('"+deviceId+"','"+a+"','"+owner+"','"+UUID.randomUUID()+"','My laptop',now())");
+
+            for (String table : new String[]{"attachment","notification","content_report","participant_device_credential"}) {
+                s.execute("SELECT set_config('app.tenant_id','"+b+"',true)");
+                try(var rs=s.executeQuery("SELECT count(*) FROM stir."+table)){rs.next();assertEquals(0,rs.getInt(1),table+" must be invisible from tenant B");}
+                s.execute("SELECT set_config('app.tenant_id','"+a+"',true)");
+                try(var rs=s.executeQuery("SELECT count(*) FROM stir."+table)){rs.next();assertEquals(1,rs.getInt(1),table+" must be visible from its own tenant A");}
+            }
+            s.execute("SELECT set_config('app.tenant_id','"+b+"',true)");
+            assertEquals(0,s.executeUpdate("UPDATE stir.attachment SET status='DELETED' WHERE id='"+attachmentId+"'"),"tenant B must not be able to mutate tenant A's attachment");
+            assertEquals(0,s.executeUpdate("UPDATE stir.notification SET read_at=now() WHERE id='"+notificationId+"'"),"tenant B must not be able to mutate tenant A's notification");
+            c.rollback();
+        }
+    }
 }
