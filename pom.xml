@@ -4,7 +4,7 @@
   <parent><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-parent</artifactId><version>3.4.4</version><relativePath/></parent>
   <groupId>org.stir</groupId><artifactId>stir-backend</artifactId><version>0.5.0-rc1</version>
   <name>STIR Marketplace</name>
-  <properties><java.version>21</java.version><idax.version>0.3.0</idax.version><idax-core.repository.url>https://toni-soler.github.io/idax-core-runtime/maven2</idax-core.repository.url></properties>
+  <properties><java.version>21</java.version><idax.version>0.4.0</idax.version><idax-core.repository.url>https://toni-soler.github.io/idax-core-runtime/maven2</idax-core.repository.url></properties>
   <repositories><repository><id>idax-public</id><url>${idax-core.repository.url}</url></repository></repositories>
   <dependencies>
     <dependency><groupId>es.idynamicsax.idax</groupId><artifactId>idax-core</artifactId><version>${idax.version}</version></dependency>

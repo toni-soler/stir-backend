@@ -1,6 +1,6 @@
 # STIR backend 0.2.0-SNAPSHOT
 
-Java 21 / Boot 3.4.4; public Core binary es.idynamicsax.idax:idax-core:0.3.0. Source is Apache-2.0, Core retains its binary license. Public osTRIS 0.3 authentication/module configuration adapted under Apache-2.0 (Copyright 2026 Toni Soler).
+Java 21 / Boot 3.4.4; public Core binary es.idynamicsax.idax:idax-core:0.4.0. Source is Apache-2.0, Core retains its binary license. Public osTRIS authentication/module configuration adapted under Apache-2.0 (Copyright 2026 Toni Soler).
 
 `mvn -s .mvn/public-settings.xml clean verify`
 
