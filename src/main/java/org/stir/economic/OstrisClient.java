@@ -1,5 +1,6 @@
 package org.stir.economic;
 
+import es.idynamicsax.idax.tenant.TenantContext;
 import java.math.BigInteger;
 import java.util.List;
 import java.util.Map;
@@ -30,19 +31,27 @@ public class OstrisClient {
         if (header == null || header.isBlank()) throw new StirOstrisException(401, "MISSING_AUTHORIZATION", "No bearer token to relay to osTRIS");
         return header;
     }
+    // The caller's JWT may carry no tenant claim at all (e.g. an admin-bootstrap superuser
+    // identity) - STIR's own TenantContextFilter still resolves the active tenant for the inbound
+    // request, but that resolution never reached osTRIS before, since only Authorization was
+    // relayed. Without this, osTRIS's OstrisJwtAuthFilter rejects such calls with 401.
+    private void applyTenant(org.springframework.http.HttpHeaders headers) {
+        var tenant = TenantContext.get();
+        if (tenant != null && tenant.getTenantId() != null) headers.set("X-Tenant", tenant.getTenantId().toString());
+    }
     private <T> T get(String uri, Class<T> type) {
         try {
-            return client.get().uri(uri).header("Authorization", currentAuthorizationHeader()).retrieve().body(type);
+            return client.get().uri(uri).header("Authorization", currentAuthorizationHeader()).headers(this::applyTenant).retrieve().body(type);
         } catch (org.springframework.web.client.RestClientResponseException ex) { throw StirOstrisException.from(ex); }
     }
     private <T> List<T> getList(String uri, org.springframework.core.ParameterizedTypeReference<List<T>> type) {
         try {
-            return client.get().uri(uri).header("Authorization", currentAuthorizationHeader()).retrieve().body(type);
+            return client.get().uri(uri).header("Authorization", currentAuthorizationHeader()).headers(this::applyTenant).retrieve().body(type);
         } catch (org.springframework.web.client.RestClientResponseException ex) { throw StirOstrisException.from(ex); }
     }
     private <T> T post(String uri, Object body, Class<T> type) {
         try {
-            var spec = client.post().uri(uri).header("Authorization", currentAuthorizationHeader()).contentType(org.springframework.http.MediaType.APPLICATION_JSON);
+            var spec = client.post().uri(uri).header("Authorization", currentAuthorizationHeader()).headers(this::applyTenant).contentType(org.springframework.http.MediaType.APPLICATION_JSON);
             var response = body == null ? spec.retrieve() : spec.body(body).retrieve();
             // A terminal call is required even for a bodiless response: without one, retrieve()'s
             // default error handling never runs and a 4xx/5xx from osTRIS would pass as "success".
