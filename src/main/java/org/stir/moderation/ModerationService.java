@@ -13,6 +13,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 import org.stir.listing.ListingRepository;
+import org.stir.participant.ParticipantProfileRepository;
 import static org.springframework.http.HttpStatus.*;
 
 @Service @Transactional
@@ -20,9 +21,10 @@ public class ModerationService {
     private static final Logger log = LoggerFactory.getLogger(ModerationService.class);
     private final ContentReportRepository reports;
     private final ListingRepository listings;
+    private final ParticipantProfileRepository profiles;
 
-    public ModerationService(ContentReportRepository reports, ListingRepository listings) {
-        this.reports = reports; this.listings = listings;
+    public ModerationService(ContentReportRepository reports, ListingRepository listings, ParticipantProfileRepository profiles) {
+        this.reports = reports; this.listings = listings; this.profiles = profiles;
     }
 
     private UUID tenant() {
@@ -43,11 +45,24 @@ public class ModerationService {
         report.id = UUID.randomUUID(); report.tenantId = tenant; report.reporterUserId = actor;
         report.targetType = targetType; report.targetId = targetId; report.reason = reason.trim();
         report.status = "OPEN"; report.createdAt = Instant.now();
-        return ReportView.of(reports.saveAndFlush(report));
+        return toView(reports.saveAndFlush(report));
     }
 
     public Page<ReportView> openReports(int page, int size) {
-        return reports.findByTenantIdAndStatusOrderByCreatedAtDesc(tenant(), "OPEN", PageRequest.of(page, size)).map(ReportView::of);
+        return reports.findByTenantIdAndStatusOrderByCreatedAtDesc(tenant(), "OPEN", PageRequest.of(page, size)).map(this::toView);
+    }
+
+    // A moderator deciding "Ocultar publicación" vs "Descartar" needs to see what's actually being
+    // reported, not just its type/id - previously the queue showed neither a title nor a way to
+    // open the target before deciding. Falls back to null (frontend shows a generic placeholder)
+    // if the target was deleted after the report was filed, rather than failing the whole list.
+    private ReportView toView(ContentReport r) {
+        String preview = switch (r.targetType) {
+            case "LISTING" -> listings.findByIdAndTenantId(r.targetId, r.tenantId).map(l -> l.title).orElse(null);
+            case "PROFILE" -> profiles.findByTenantIdAndUserId(r.tenantId, r.targetId).map(p -> p.displayName).orElse(null);
+            default -> null;
+        };
+        return ReportView.of(r, preview);
     }
 
     public ReportView dismiss(CurrentUser user, UUID reportId) {
@@ -79,10 +94,10 @@ public class ModerationService {
         var report = reports.findByIdAndTenantId(reportId, tenant).orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "Report not found"));
         if (!"OPEN".equals(report.status)) throw new ResponseStatusException(CONFLICT, "Report already resolved");
         report.status = status; report.resolvedAt = Instant.now(); report.resolvedByUserId = actor;
-        return ReportView.of(reports.saveAndFlush(report));
+        return toView(reports.saveAndFlush(report));
     }
 
-    public record ReportView(UUID id, String targetType, UUID targetId, String reason, String status, Instant createdAt) {
-        static ReportView of(ContentReport r) { return new ReportView(r.id, r.targetType, r.targetId, r.reason, r.status, r.createdAt); }
+    public record ReportView(UUID id, String targetType, UUID targetId, String reason, String status, Instant createdAt, String targetPreview) {
+        static ReportView of(ContentReport r, String targetPreview) { return new ReportView(r.id, r.targetType, r.targetId, r.reason, r.status, r.createdAt, targetPreview); }
     }
 }
