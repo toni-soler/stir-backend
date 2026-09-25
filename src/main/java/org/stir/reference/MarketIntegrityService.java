@@ -25,6 +25,7 @@ public class MarketIntegrityService {
         return rows.getFirst();
     }
     public Map<String,Object> signal(CurrentUser user,SignalRequest input) {
+        ReferenceService.requireCommunityAuthority(user);
         UUID actor=ReferenceService.actor(user);
         if(input==null || input.observationId()==null || input.signalCode()==null ||
            !Set.of("REPEATED_RELATIONSHIP","HIGH_COUNTERPARTY_CONCENTRATION","RELATED_PARTICIPANT_CLUSTER",
@@ -48,6 +49,7 @@ public class MarketIntegrityService {
             ReferenceService.tenant(),caseId,status,reason,actor,Timestamp.from(Instant.now()),sequence);
     }
     public Map<String,Object> decide(CurrentUser user,UUID id,DecisionRequest input) {
+        ReferenceService.requireCommunityAuthority(user);
         UUID actor=ReferenceService.actor(user);
         db.queryForList("select pg_advisory_xact_lock(hashtextextended(?,0))",ReferenceService.tenant()+":integrity:"+id);
         var c=one(id);

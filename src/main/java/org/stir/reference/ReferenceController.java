@@ -14,15 +14,8 @@ import org.springframework.web.bind.annotation.*;
 public class ReferenceController {
     private final ReferenceService service;
     public ReferenceController(ReferenceService service) { this.service=service; }
-    // idax-core's PermissionService.hasPermission(CurrentUser,String) unconditionally returns true
-    // for authentication.principal.superuser, for every permission string, in every tenant - a
-    // platform capability, not a community one. @PreAuthorize alone would silently let a platform
-    // SuperAdmin read private observations, configure reference policy or publish/review community
-    // references purely by being SuperAdmin. Reject that here, once, for the whole controller,
-    // instead of relying on a permission check that was never scoped to make this distinction.
-    @ModelAttribute public void tenant(@PathVariable UUID tenantId, @AuthenticationPrincipal CurrentUser user) {
+    @ModelAttribute public void tenant(@PathVariable UUID tenantId) {
         if(!tenantId.equals(ReferenceService.tenant())) throw new AccessDeniedException("Tenant context mismatch");
-        if(user!=null && user.isSuperuser()) throw new AccessDeniedException("Platform administration does not grant community governance");
     }
     @GetMapping @PreAuthorize("@permissionService.hasPermission('stir.references.read')")
     public Object definitions() { return service.definitions(); }
@@ -30,8 +23,17 @@ public class ReferenceController {
     public Object community() { return service.binding(); }
     @GetMapping("/publish-access") @PreAuthorize("@permissionService.hasPermission('stir.references.publish')")
     public Object access() { return Map.of("allowed",true); }
+    // requireCommunityAuthority(user) below is the same shared ReferenceService check the service
+    // method itself calls again - a fast, defense-in-depth rejection here, never a second
+    // implementation of the rule. See ReferenceService.requireCommunityAuthority for why
+    // @PreAuthorize's permission string alone cannot be this boundary (idax-core grants every
+    // stir.* permission to a platform superuser unconditionally). Plain reads (definitions, view,
+    // history, proposals, community, agreement context) are ordinary community/party reads and are
+    // deliberately left to the permission check alone - only mutation authority is gated here.
     @PostMapping @PreAuthorize("@permissionService.hasPermission('stir.references.propose')")
-    public Object create(@AuthenticationPrincipal CurrentUser user,@Valid @RequestBody DefinitionRequest request) { return service.create(user,request); }
+    public Object create(@AuthenticationPrincipal CurrentUser user,@Valid @RequestBody DefinitionRequest request) {
+        ReferenceService.requireCommunityAuthority(user); return service.create(user,request);
+    }
     @GetMapping("/{id}") @PreAuthorize("@permissionService.hasPermission('stir.references.read')")
     public Object view(@PathVariable UUID id) { return service.view(id); }
     @GetMapping("/{id}/observations") @PreAuthorize("@permissionService.hasPermission('stir.references.publish')")
@@ -43,11 +45,17 @@ public class ReferenceController {
     @GetMapping("/{id}/proposals") @PreAuthorize("@permissionService.hasPermission('stir.references.read')")
     public Object proposals(@PathVariable UUID id) { return service.proposals(id); }
     @PostMapping("/{id}/proposals") @PreAuthorize("@permissionService.hasPermission('stir.references.propose')")
-    public Object propose(@PathVariable UUID id,@AuthenticationPrincipal CurrentUser user,@Valid @RequestBody ProposalRequest r) { return service.propose(user,id,r); }
+    public Object propose(@PathVariable UUID id,@AuthenticationPrincipal CurrentUser user,@Valid @RequestBody ProposalRequest r) {
+        ReferenceService.requireCommunityAuthority(user); return service.propose(user,id,r);
+    }
     @PostMapping("/proposals/{id}/publish") @PreAuthorize("@permissionService.hasPermission('stir.references.publish')")
-    public Object publish(@PathVariable UUID id,@AuthenticationPrincipal CurrentUser user,@Valid @RequestBody PublishRequest r) { return service.publish(user,id,r.decision()); }
+    public Object publish(@PathVariable UUID id,@AuthenticationPrincipal CurrentUser user,@Valid @RequestBody PublishRequest r) {
+        ReferenceService.requireCommunityAuthority(user); return service.publish(user,id,r.decision());
+    }
     @PostMapping("/{id}/policies") @PreAuthorize("@permissionService.hasPermission('stir.references.publish')")
-    public Object policy(@PathVariable UUID id,@AuthenticationPrincipal CurrentUser user,@Valid @RequestBody PolicyRequest r) { return service.policy(user,id,r); }
+    public Object policy(@PathVariable UUID id,@AuthenticationPrincipal CurrentUser user,@Valid @RequestBody PolicyRequest r) {
+        ReferenceService.requireCommunityAuthority(user); return service.policy(user,id,r);
+    }
     @GetMapping("/agreements/{id}/context") @PreAuthorize("@permissionService.hasPermission('stir.agreements.read')")
     public Object context(@PathVariable UUID id,@AuthenticationPrincipal CurrentUser user) { return service.agreementContext(user,id); }
 

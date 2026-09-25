@@ -32,6 +32,20 @@ public class ReferenceService {
         if(user==null || user.isService() || user.getUserId()==null) throw new AccessDeniedException("User required");
         return user.getUserId();
     }
+    /** PLATFORM ADMINISTRATION MUST NEVER BE INTERPRETED AS COMMUNITY GOVERNANCE AUTHORITY
+     * (GOVERNANCE_CAPTURE_THREAT_MODEL.md). idax-core's PermissionService grants every stir.*
+     * permission string to a platform superuser unconditionally, so @PreAuthorize alone cannot
+     * be the boundary for a community-governed mutation. This is that boundary: the single,
+     * reused check every sensitive mutation in this bounded context (a reference definition, its
+     * policy, a proposal, a publication, a market integrity signal/decision) must pass, regardless
+     * of which controller or future caller reaches it. A platform SuperAdmin has no constitutional
+     * seat, no Guardian role and no community role of their own - being SuperAdmin never
+     * substitutes for one. Ordinary public/community reads do not call this; only mutation
+     * authority is gated here, not all of STIR. */
+    static void requireCommunityAuthority(CurrentUser user) {
+        actor(user);
+        if(user.isSuperuser()) throw new AccessDeniedException("Platform administration does not grant community governance authority");
+    }
     static Map<String,Object> parse(String json) {
         try { return JSON.readValue(json,new TypeReference<Map<String,Object>>(){}); }
         catch(Exception e) { throw new IllegalStateException("Invalid stored reference JSON",e); }
@@ -62,6 +76,7 @@ public class ReferenceService {
         return rows.getFirst();
     }
     public Map<String,Object> create(CurrentUser user, ReferenceController.DefinitionRequest r) {
+        requireCommunityAuthority(user);
         var binding=one("select community_id,unit_id from stir.marketplace_economic_binding where tenant_id=?",tenant());
         UUID id=UUID.randomUUID();
         // Explicit existing community/unit binding, never tenant identity or a fiat conversion.
@@ -77,6 +92,7 @@ public class ReferenceService {
         return definition(id);
     }
     public Map<String,Object> policy(CurrentUser user,UUID id,ReferenceController.PolicyRequest r) {
+        requireCommunityAuthority(user);
         lock(id); if(r.freshnessDays()>r.windowDays()) throw new ResponseStatusException(BAD_REQUEST,"Freshness exceeds window");
         if(r.independenceChecksRequired()!=null || r.concentrationChecksRequired()!=null ||
            r.provenanceRequired()!=null || r.forceReference()!=null)
@@ -155,6 +171,7 @@ public class ReferenceService {
         return manifest;
     }
     public Map<String,Object> propose(CurrentUser user, UUID id, ReferenceController.ProposalRequest r) {
+        requireCommunityAuthority(user);
         definition(id);
         boolean qualitative="QUALITATIVE".equals(r.kind());
         if(qualitative ? r.lowerValue()!=null || r.upperValue()!=null : r.lowerValue()==null || r.upperValue()==null || r.lowerValue().compareTo(r.upperValue())>0)
@@ -168,6 +185,7 @@ public class ReferenceService {
         return one("select * from stir.reference_proposal where tenant_id=? and id=?",tenant(),proposal);
     }
     public Map<String,Object> publish(CurrentUser user,UUID proposal,String decision) {
+        requireCommunityAuthority(user);
         var p=one("select * from stir.reference_proposal where tenant_id=? and id=?",tenant(),proposal);
         UUID id=(UUID)p.get("definition_id"); lock(id);
         var prior=db.queryForList("select id from stir.community_reference where tenant_id=? and proposal_id=?",tenant(),proposal);

@@ -12,21 +12,20 @@ import org.springframework.web.bind.annotation.*;
 public class MarketIntegrityController {
     private final MarketIntegrityService service;
     public MarketIntegrityController(MarketIntegrityService service) {this.service=service;}
-    // See ReferenceController.tenant(): idax-core's PermissionService grants every permission to
-    // authentication.principal.superuser unconditionally, so @PreAuthorize alone would let a
-    // platform SuperAdmin raise signals and decide market integrity cases purely by being
-    // SuperAdmin. Reject that here, once, for the whole controller.
-    @ModelAttribute public void tenant(@PathVariable UUID tenantId, @AuthenticationPrincipal CurrentUser user) {
+    @ModelAttribute public void tenant(@PathVariable UUID tenantId) {
         if(!tenantId.equals(ReferenceService.tenant())) throw new AccessDeniedException("Tenant context mismatch");
-        if(user!=null && user.isSuperuser()) throw new AccessDeniedException("Platform administration does not grant community governance");
     }
+    // requireCommunityAuthority(user) is the same shared ReferenceService check signal()/decide()
+    // call again themselves - see ReferenceService.requireCommunityAuthority. Fast defense-in-depth
+    // here, never a second implementation. cases()/history() stay permission-gated only, same as
+    // ReferenceController's plain reads.
     @PostMapping("/signals") @PreAuthorize("@permissionService.hasPermission('stir.references.publish')")
     public Object signal(@AuthenticationPrincipal CurrentUser user,@RequestBody MarketIntegrityService.SignalRequest body) {
-        return service.signal(user,body);
+        ReferenceService.requireCommunityAuthority(user); return service.signal(user,body);
     }
     @PostMapping("/cases/{id}/decisions") @PreAuthorize("@permissionService.hasPermission('stir.references.publish')")
     public Object decide(@AuthenticationPrincipal CurrentUser user,@PathVariable UUID id,@RequestBody MarketIntegrityService.DecisionRequest body) {
-        return service.decide(user,id,body);
+        ReferenceService.requireCommunityAuthority(user); return service.decide(user,id,body);
     }
     @GetMapping("/definitions/{id}/cases") @PreAuthorize("@permissionService.hasPermission('stir.references.publish')")
     public Object cases(@PathVariable UUID id) {return service.cases(id);}

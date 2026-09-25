@@ -7,6 +7,7 @@ import java.util.*;
 import es.idynamicsax.idax.tenant.TenantContext;
 import es.idynamicsax.idax.security.CurrentUser;
 import org.flywaydb.core.Flyway;
+import org.springframework.security.access.AccessDeniedException;
 import org.junit.jupiter.api.*;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.SingleConnectionDataSource;
@@ -19,7 +20,7 @@ import static org.mockito.Mockito.*;
 class ReferencePostgresTest {
     @Container static PostgreSQLContainer<?> db=new PostgreSQLContainer<>("postgres:17-alpine");
     Connection connection; JdbcTemplate jdbc; ReferenceService service;
-    UUID tenant=UUID.randomUUID(), userId=UUID.randomUUID(); CurrentUser user;
+    UUID tenant=UUID.randomUUID(), userId=UUID.randomUUID(); CurrentUser user, superadmin;
     @BeforeAll static void migrate() throws Exception {
         try(var c=DriverManager.getConnection(db.getJdbcUrl(),db.getUsername(),db.getPassword());var s=c.createStatement()) { s.execute("create role idax_app; create role idax_admin"); }
         Flyway.configure().dataSource(db.getJdbcUrl(),db.getUsername(),db.getPassword()).schemas("stir").locations("classpath:db/migration-stir").load().migrate();
@@ -30,6 +31,7 @@ class ReferencePostgresTest {
         jdbc.execute("set local role idax_app"); jdbc.queryForObject("select set_config('app.tenant_id',?,true)",String.class,tenant.toString());
         TenantContext.set(new TenantContext(tenant,null,userId,"test",TenantContext.DbRole.IDAX_APP));
         user=mock(CurrentUser.class);when(user.getUserId()).thenReturn(userId);service=new ReferenceService(jdbc);
+        superadmin=mock(CurrentUser.class);when(superadmin.getUserId()).thenReturn(UUID.randomUUID());when(superadmin.isSuperuser()).thenReturn(true);
         jdbc.update("insert into stir.marketplace_economic_binding values (?,?,?,now())",tenant,UUID.randomUUID(),UUID.randomUUID());
     }
     @AfterEach void close() throws Exception {connection.rollback();connection.close();TenantContext.clear();}
@@ -182,5 +184,79 @@ class ReferencePostgresTest {
         assertThrows(Exception.class,()->jdbc.update("update stir.reference_definition set name='rewritten' where id=?",id));
         connection.rollback(savepoint);
         assertEquals("Bread",service.definition(id).get("name"));
+    }
+
+    // Platform administration is not community governance - requireCommunityAuthority regression
+    // suite (GOVERNANCE_CAPTURE_THREAT_MODEL.md). idax-core grants every stir.* permission string
+    // to a platform superuser unconditionally, so these tests call ReferenceService/
+    // MarketIntegrityService directly, bypassing @PreAuthorize and the controller layer entirely -
+    // exactly what a future caller that skips the controller would do - to prove the boundary is
+    // real at the service layer, not merely simulated by the controller's own defense-in-depth call.
+
+    @Test void platformSuperAdminCannotReachAnyReferenceMutationDirectlyThroughTheService() {
+        // Scenario 2+4: called directly (no controller in the path at all) with a superuser whose
+        // stir.* permission string would already have been granted by idax-core - the rejection
+        // here does not come from a missing permission, it comes from requireCommunityAuthority.
+        UUID id=definition();
+        assertThrows(AccessDeniedException.class,()->service.create(superadmin,new ReferenceController.DefinitionRequest("Milk","1L bottle",Map.of(),BigDecimal.ONE,"bottle")));
+        assertThrows(AccessDeniedException.class,()->service.propose(superadmin,id,proposal("10")));
+        assertThrows(AccessDeniedException.class,()->service.policy(superadmin,id,new ReferenceController.PolicyRequest(90,5,6,new BigDecimal("0.3"),30,"Superadmin attempt")));
+        var proposal=service.propose(user,id,proposal("10"));
+        assertThrows(AccessDeniedException.class,()->service.publish(superadmin,(UUID)proposal.get("id"),"Superadmin attempt"));
+        // Scenario 3: the exact same operations, same definition, same actor role otherwise -
+        // succeed for a community-authorized (non-superuser) actor.
+        service.policy(user,id,new ReferenceController.PolicyRequest(90,5,6,new BigDecimal("0.3"),30,"Community-authorized"));
+        service.publish(user,(UUID)proposal.get("id"),"Community-authorized decision");
+        assertEquals(1,service.current(id).get("version"));
+    }
+
+    @Test void platformSuperAdminCannotReachMarketIntegrityMutationsDirectlyThroughTheService() {
+        UUID id=definition();var d=service.definition(id);UUID source=UUID.randomUUID();
+        service.record(id,"AGREEMENT",source,UUID.randomUUID(),UUID.randomUUID(),BigDecimal.TEN,
+            BigDecimal.ONE,"loaf",(String)d.get("unit_ref"),true,Instant.now().minus(Duration.ofDays(1)));
+        UUID observation=jdbc.queryForObject("select id from stir.reference_observation where tenant_id=? and source_id=?",UUID.class,tenant,source);
+        var integrity=new MarketIntegrityService(jdbc);
+        // Scenario 2+4: direct service call, superuser, stir.references.publish would already pass.
+        assertThrows(AccessDeniedException.class,()->integrity.signal(superadmin,new MarketIntegrityService.SignalRequest(observation,"OUTLIER_PENDING_REVIEW","Superadmin attempt",List.of())));
+        // Scenario 3: the same signal, by a community-authorized actor, succeeds.
+        var signal=integrity.signal(user,new MarketIntegrityService.SignalRequest(observation,"OUTLIER_PENDING_REVIEW","Community-authorized",List.of("private-case-3")));
+        UUID caseId=(UUID)signal.get("id");
+        assertThrows(AccessDeniedException.class,()->integrity.decide(superadmin,caseId,new MarketIntegrityService.DecisionRequest("UNDER_REVIEW","Superadmin attempt")));
+        integrity.decide(user,caseId,new MarketIntegrityService.DecisionRequest("UNDER_REVIEW","Community-authorized"));
+        assertEquals(2,integrity.history(caseId).size());
+    }
+
+    @Test void superAdminStillRetainsTenantScopedReadsWhichAreNotMutationAuthority() {
+        // Scenario 5 (partial, at this service's boundary): SuperAdmin exclusion is scoped to
+        // mutation authority, not to STIR as a whole - a superuser can still read what any
+        // permitted actor can read here (definitions/current/history stay permission-gated only,
+        // per the explicit "do not over-block reads" instruction). SuperAdmin's real platform
+        // function - creating/administering tenants/workspaces via idax-shell's
+        // TenantAdminController - lives outside this bounded context entirely and is unaffected by
+        // requireCommunityAuthority, which this service never calls from any read path; the E2E
+        // fixtures that log in as admin@stir.test and then successfully provision the disposable
+        // tenant each script runs against are the live proof of that at the HTTP level.
+        UUID id=definition();var proposal=service.propose(user,id,proposal("10"));service.publish(user,(UUID)proposal.get("id"),"Decision");
+        assertEquals(service.definitions(),service.definitions());
+        assertEquals(service.current(id),service.current(id));
+        assertDoesNotThrow(()->service.history(id));
+    }
+
+    @Test void tenantADoesNotAcquireAuthorityOverTenantBMutationsThroughThisGuard() {
+        // Scenario 6: switching to a different tenant's context does not let an otherwise
+        // community-authorized (non-superuser) actor mutate a definition that belongs to a
+        // different tenant - requireCommunityAuthority is not a substitute for, and does not
+        // weaken, tenant isolation. The rejection below is a plain 404 from RLS + the
+        // tenant-scoped lookup query, not a permission or authority grant crossing tenant lines.
+        UUID id=definition();
+        UUID tenantB=UUID.randomUUID();
+        jdbc.queryForObject("select set_config('app.tenant_id',?,true)",String.class,tenantB.toString());
+        jdbc.update("insert into stir.marketplace_economic_binding values (?,?,?,now())",tenantB,UUID.randomUUID(),UUID.randomUUID());
+        TenantContext.set(new TenantContext(tenantB,null,userId,"test",TenantContext.DbRole.IDAX_APP));
+        assertThrows(Exception.class,()->service.propose(user,id,proposal("10")));
+        assertThrows(Exception.class,()->service.policy(user,id,new ReferenceController.PolicyRequest(90,5,6,new BigDecimal("0.3"),30,"Cross-tenant attempt")));
+        TenantContext.set(new TenantContext(tenant,null,userId,"test",TenantContext.DbRole.IDAX_APP));
+        jdbc.queryForObject("select set_config('app.tenant_id',?,true)",String.class,tenant.toString());
+        assertDoesNotThrow(()->service.propose(user,id,proposal("10")));
     }
 }
