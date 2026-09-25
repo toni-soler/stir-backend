@@ -65,6 +65,22 @@ class ReferencePostgresTest {
         var p=service.propose(user,id,new ReferenceController.ProposalRequest("VALUE",new BigDecimal("100"),new BigDecimal("100"),"Community chooses a value different from the median","Assembly",10));
         service.publish(user,(UUID)p.get("id"),"Independent normative decision");assertEquals(new BigDecimal("100.00"),service.current(id).get("lower_value"));
     }
+    @Test void observationsAndEvidenceManifestExposeRawVsEligibleOnlyToPublishers() {
+        UUID id=definition();var d=service.definition(id);
+        UUID excludedSource=UUID.randomUUID();
+        service.record(id,"AGREEMENT",excludedSource,UUID.randomUUID(),UUID.randomUUID(),BigDecimal.TEN,BigDecimal.ONE,"loaf",(String)d.get("unit_ref"),false,Instant.now().minus(Duration.ofDays(1)));
+        for(int i=0;i<5;i++)service.record(id,"AGREEMENT",UUID.randomUUID(),UUID.randomUUID(),UUID.randomUUID(),BigDecimal.valueOf(10+i),BigDecimal.ONE,"loaf",(String)d.get("unit_ref"),true,Instant.now().minus(Duration.ofDays(1)));
+        var observations=service.observations(id);
+        assertEquals(6,observations.size());
+        assertTrue(observations.stream().allMatch(o->o.containsKey("participant_a")&&o.containsKey("participant_b")));
+        UUID excludedObservationId=jdbc.queryForObject("select id from stir.reference_observation where tenant_id=? and source_id=?",UUID.class,tenant,excludedSource);
+        var manifest=service.evidenceManifest(id);
+        @SuppressWarnings("unchecked") var included=(java.util.List<String>)manifest.get("included");
+        @SuppressWarnings("unchecked") var exclusions=(Map<String,String>)manifest.get("exclusions");
+        assertEquals(5,included.size());
+        assertEquals("NO_BILATERAL_CONSENT",exclusions.get(excludedObservationId.toString()));
+        assertFalse(included.contains(excludedObservationId.toString()));
+    }
     @Test void finalIntegrityFindingChangesEligibilityWithoutRewritingRawAgreement() {
         UUID id=definition(); var d=service.definition(id); UUID extreme=null;
         for(int i=0;i<6;i++) {
@@ -87,6 +103,28 @@ class ReferencePostgresTest {
         String manifest=jdbc.queryForObject("select evidence_json from stir.reference_snapshot where tenant_id=? and id=?",String.class,
             tenant,UUID.fromString((String)result.get("id")));
         assertTrue(manifest.contains("FINAL_INTEGRITY_FINDING:RELATED_PARTICIPANT_CLUSTER"));
+    }
+    @Test void signalCanReachFinalThroughTheRealDecideFlowWithoutDeletingTheRawObservation() {
+        // A FINAL decision only changes tomorrow's-or-later eligibility (dailyCutPreventsLiveDifferencing);
+        // finalIntegrityFindingChangesEligibilityWithoutRewritingRawAgreement below already proves that
+        // effect. This test proves the real signal()->UNDER_REVIEW->FINAL transition chain itself -
+        // including the originator-cannot-decide-own-case rule along the way - reaches FINAL correctly
+        // and never touches the raw observation row.
+        UUID id=definition();var d=service.definition(id);UUID source=UUID.randomUUID();
+        service.record(id,"AGREEMENT",source,UUID.randomUUID(),UUID.randomUUID(),BigDecimal.valueOf(1000),
+            BigDecimal.ONE,"loaf",(String)d.get("unit_ref"),true,Instant.now().minus(Duration.ofDays(1)));
+        UUID observation=jdbc.queryForObject("select id from stir.reference_observation where tenant_id=? and source_id=?",UUID.class,tenant,source);
+        var integrity=new MarketIntegrityService(jdbc);
+        var signal=integrity.signal(user,new MarketIntegrityService.SignalRequest(observation,"HIGH_COUNTERPARTY_CONCENTRATION",
+            "Concentrated with one counterparty",List.of("private-case-2")));
+        UUID caseId=(UUID)signal.get("id");
+        integrity.decide(user,caseId,new MarketIntegrityService.DecisionRequest("UNDER_REVIEW","Examining"));
+        assertThrows(Exception.class,()->integrity.decide(user,caseId,new MarketIntegrityService.DecisionRequest("FINAL","Self approval")));
+        CurrentUser reviewer=mock(CurrentUser.class);when(reviewer.getUserId()).thenReturn(UUID.randomUUID());
+        var finalDecision=integrity.decide(reviewer,caseId,new MarketIntegrityService.DecisionRequest("FINAL","Confirmed concentration"));
+        assertEquals("FINAL",finalDecision.get("status"));
+        assertEquals(3,integrity.history(caseId).size());
+        assertEquals(1,jdbc.queryForObject("select count(*) from stir.reference_observation where tenant_id=? and id=?",Integer.class,tenant,observation));
     }
     @Test void anomalyMustBeReviewedAndCanBeDismissedWithoutExcludingTheAgreement() {
         UUID id=definition();var d=service.definition(id);UUID source=UUID.randomUUID();

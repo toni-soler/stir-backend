@@ -5,6 +5,7 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.*;
 import java.math.BigDecimal;
 import java.util.*;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
@@ -13,8 +14,15 @@ import org.springframework.web.bind.annotation.*;
 public class ReferenceController {
     private final ReferenceService service;
     public ReferenceController(ReferenceService service) { this.service=service; }
-    @ModelAttribute public void tenant(@PathVariable UUID tenantId) {
-        if(!tenantId.equals(ReferenceService.tenant())) throw new org.springframework.security.access.AccessDeniedException("Tenant context mismatch");
+    // idax-core's PermissionService.hasPermission(CurrentUser,String) unconditionally returns true
+    // for authentication.principal.superuser, for every permission string, in every tenant - a
+    // platform capability, not a community one. @PreAuthorize alone would silently let a platform
+    // SuperAdmin read private observations, configure reference policy or publish/review community
+    // references purely by being SuperAdmin. Reject that here, once, for the whole controller,
+    // instead of relying on a permission check that was never scoped to make this distinction.
+    @ModelAttribute public void tenant(@PathVariable UUID tenantId, @AuthenticationPrincipal CurrentUser user) {
+        if(!tenantId.equals(ReferenceService.tenant())) throw new AccessDeniedException("Tenant context mismatch");
+        if(user!=null && user.isSuperuser()) throw new AccessDeniedException("Platform administration does not grant community governance");
     }
     @GetMapping @PreAuthorize("@permissionService.hasPermission('stir.references.read')")
     public Object definitions() { return service.definitions(); }
@@ -26,6 +34,10 @@ public class ReferenceController {
     public Object create(@AuthenticationPrincipal CurrentUser user,@Valid @RequestBody DefinitionRequest request) { return service.create(user,request); }
     @GetMapping("/{id}") @PreAuthorize("@permissionService.hasPermission('stir.references.read')")
     public Object view(@PathVariable UUID id) { return service.view(id); }
+    @GetMapping("/{id}/observations") @PreAuthorize("@permissionService.hasPermission('stir.references.publish')")
+    public Object observations(@PathVariable UUID id) { return service.observations(id); }
+    @GetMapping("/{id}/evidence-manifest") @PreAuthorize("@permissionService.hasPermission('stir.references.publish')")
+    public Object evidenceManifest(@PathVariable UUID id) { return service.evidenceManifest(id); }
     @GetMapping("/{id}/history") @PreAuthorize("@permissionService.hasPermission('stir.references.read')")
     public Object history(@PathVariable UUID id) { return service.history(id); }
     @GetMapping("/{id}/proposals") @PreAuthorize("@permissionService.hasPermission('stir.references.read')")

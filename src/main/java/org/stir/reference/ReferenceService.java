@@ -132,6 +132,28 @@ public class ReferenceService {
     private Map<String,Object> publicSnapshot(Map<String,Object> row) {
         var result=parse((String)row.get("canonical_json")); result.put("digestSha256",row.get("digest_sha256")); return result;
     }
+    /** Private, publisher-only view: raw observations with their current integrity case status.
+     * Never exposed through the public snapshot - this is the only place STIR shows an observation's
+     * own participants/amount, gated behind stir.references.publish precisely because of that. */
+    public List<Map<String,Object>> observations(UUID id) {
+        definition(id);
+        return db.queryForList("select o.id,o.source,o.source_id,o.participant_a,o.participant_b,o.amount,o.quantity,"+
+            "o.quantity_unit,o.unit_ref,o.aggregate_consent,o.observed_at,c.id as case_id,e.status as case_status,c.signal_code "+
+            "from stir.reference_observation o "+
+            "left join lateral (select id,signal_code from stir.market_integrity_case where tenant_id=o.tenant_id and observation_id=o.id order by created_at desc limit 1) c on true "+
+            "left join lateral (select status from stir.market_integrity_case_event where tenant_id=o.tenant_id and case_id=c.id order by sequence desc limit 1) e on true "+
+            "where o.tenant_id=? and o.definition_id=? order by o.observed_at desc limit 200",tenant(),id);
+    }
+    /** Private, publisher-only reconstruction of today's snapshot: which raw observations were
+     * REFERENCE-ELIGIBLE vs EXCLUDED, and the exact reason code for each exclusion. Ensures today's
+     * snapshot exists first (same idempotent daily-cutoff cache as snapshot()/propose()). */
+    public Map<String,Object> evidenceManifest(UUID id) {
+        var current=snapshot(id);
+        var row=one("select evidence_json from stir.reference_snapshot where tenant_id=? and id=?",tenant(),UUID.fromString((String)current.get("id")));
+        var manifest=parse((String)row.get("evidence_json"));
+        manifest.put("snapshotId",current.get("id"));
+        return manifest;
+    }
     public Map<String,Object> propose(CurrentUser user, UUID id, ReferenceController.ProposalRequest r) {
         definition(id);
         boolean qualitative="QUALITATIVE".equals(r.kind());

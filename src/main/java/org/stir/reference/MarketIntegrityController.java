@@ -12,8 +12,13 @@ import org.springframework.web.bind.annotation.*;
 public class MarketIntegrityController {
     private final MarketIntegrityService service;
     public MarketIntegrityController(MarketIntegrityService service) {this.service=service;}
-    @ModelAttribute public void tenant(@PathVariable UUID tenantId) {
+    // See ReferenceController.tenant(): idax-core's PermissionService grants every permission to
+    // authentication.principal.superuser unconditionally, so @PreAuthorize alone would let a
+    // platform SuperAdmin raise signals and decide market integrity cases purely by being
+    // SuperAdmin. Reject that here, once, for the whole controller.
+    @ModelAttribute public void tenant(@PathVariable UUID tenantId, @AuthenticationPrincipal CurrentUser user) {
         if(!tenantId.equals(ReferenceService.tenant())) throw new AccessDeniedException("Tenant context mismatch");
+        if(user!=null && user.isSuperuser()) throw new AccessDeniedException("Platform administration does not grant community governance");
     }
     @PostMapping("/signals") @PreAuthorize("@permissionService.hasPermission('stir.references.publish')")
     public Object signal(@AuthenticationPrincipal CurrentUser user,@RequestBody MarketIntegrityService.SignalRequest body) {
