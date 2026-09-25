@@ -11,6 +11,7 @@ import org.springframework.security.access.AccessDeniedException;
 import org.junit.jupiter.api.*;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.SingleConnectionDataSource;
+import org.stir.economic.OstrisClient;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.*;
 import static org.junit.jupiter.api.Assertions.*;
@@ -19,7 +20,7 @@ import static org.mockito.Mockito.*;
 @Testcontainers
 class ReferencePostgresTest {
     @Container static PostgreSQLContainer<?> db=new PostgreSQLContainer<>("postgres:17-alpine");
-    Connection connection; JdbcTemplate jdbc; ReferenceService service;
+    Connection connection; JdbcTemplate jdbc; ReferenceService service; ParticipantIndependenceService independenceService; OstrisClient ostrisClient;
     UUID tenant=UUID.randomUUID(), userId=UUID.randomUUID(); CurrentUser user, superadmin;
     @BeforeAll static void migrate() throws Exception {
         try(var c=DriverManager.getConnection(db.getJdbcUrl(),db.getUsername(),db.getPassword());var s=c.createStatement()) { s.execute("create role idax_app; create role idax_admin"); }
@@ -30,7 +31,8 @@ class ReferencePostgresTest {
         jdbc=new JdbcTemplate(new SingleConnectionDataSource(connection,true));
         jdbc.execute("set local role idax_app"); jdbc.queryForObject("select set_config('app.tenant_id',?,true)",String.class,tenant.toString());
         TenantContext.set(new TenantContext(tenant,null,userId,"test",TenantContext.DbRole.IDAX_APP));
-        user=mock(CurrentUser.class);when(user.getUserId()).thenReturn(userId);service=new ReferenceService(jdbc);
+        ostrisClient=mock(OstrisClient.class); independenceService=new ParticipantIndependenceService(jdbc,ostrisClient);
+        user=mock(CurrentUser.class);when(user.getUserId()).thenReturn(userId);service=new ReferenceService(jdbc,independenceService);
         superadmin=mock(CurrentUser.class);when(superadmin.getUserId()).thenReturn(UUID.randomUUID());when(superadmin.isSuperuser()).thenReturn(true);
         jdbc.update("insert into stir.marketplace_economic_binding values (?,?,?,now())",tenant,UUID.randomUUID(),UUID.randomUUID());
     }
@@ -42,7 +44,7 @@ class ReferencePostgresTest {
         var first=service.current(id); var evidence=service.snapshot(id);
         var p2=service.propose(user,id,proposal("20"));service.publish(user,(UUID)p2.get("id"),"Decision two");
         assertEquals(2,service.current(id).get("version"));assertEquals(first,service.history(id).get(1));
-        assertEquals(evidence,new ReferenceService(jdbc).snapshot(id));
+        assertEquals(evidence,new ReferenceService(jdbc,independenceService).snapshot(id));
         assertEquals("INSUFFICIENT_DATA",evidence.get("status"));assertNull(evidence.get("median"));
         assertThrows(Exception.class,()->jdbc.update("update stir.community_reference set version=99 where id=?",first.get("id")));
     }
@@ -63,7 +65,7 @@ class ReferencePostgresTest {
         assertFalse(s.containsKey("included"));assertFalse(s.containsKey("exclusions"));assertFalse(s.containsKey("participant_a"));
         String canonical=jdbc.queryForObject("select canonical_json from stir.reference_snapshot where tenant_id=? and id=?",String.class,tenant,UUID.fromString((String)s.get("id")));
         assertEquals(s.get("digestSha256"),ReferenceService.digest(canonical));assertEquals(canonical,ReferenceService.canonical(ReferenceService.parse(canonical)));
-        assertEquals(s,new ReferenceService(jdbc).snapshot(id));
+        assertEquals(s,new ReferenceService(jdbc,independenceService).snapshot(id));
         var p=service.propose(user,id,new ReferenceController.ProposalRequest("VALUE",new BigDecimal("100"),new BigDecimal("100"),"Community chooses a value different from the median","Assembly",10));
         service.publish(user,(UUID)p.get("id"),"Independent normative decision");assertEquals(new BigDecimal("100.00"),service.current(id).get("lower_value"));
     }
@@ -168,7 +170,7 @@ class ReferencePostgresTest {
         assertEquals(json,ReferenceService.canonical(ReferenceService.parse(json)));
         assertEquals(false,ReferenceService.parse(json).get("contractual"));
         var next=service.propose(user,definition,proposal("50"));service.publish(user,(UUID)next.get("id"),"Second decision");
-        assertEquals(context,new ReferenceService(jdbc).agreementContext(user,agreement));
+        assertEquals(context,new ReferenceService(jdbc,independenceService).agreementContext(user,agreement));
         var stranger=mock(CurrentUser.class);when(stranger.getUserId()).thenReturn(UUID.randomUUID());
         assertThrows(Exception.class,()->service.agreementContext(stranger,agreement));
         jdbc.queryForObject("select set_config('app.tenant_id',?,true)",String.class,UUID.randomUUID().toString());

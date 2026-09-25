@@ -103,6 +103,14 @@ public class OstrisClient {
         return getList("/api/ostris/communities/" + community + "/controllers/" + controllerId + "/credentials",
             new org.springframework.core.ParameterizedTypeReference<>() {});
     }
+    // Private identity continuity: osTRIS itself never certifies independence, only ever
+    // CONFIRMED/CONTESTED/REJECTED relatedness to a specific candidate RiskSubject, or
+    // StirOstrisException("CONTINUITY_NOT_FOUND", 422) when no decision was ever recorded for this
+    // participant - the caller must treat that as "unknown," never as "independent."
+    public IdentityContinuityView privateContinuity(UUID community, UUID participant) {
+        return get("/api/ostris/identity/communities/" + community + "/participants/" + participant + "/continuity", IdentityContinuityView.class);
+    }
+    public record IdentityContinuityView(UUID decisionId, UUID participantId, String status, long communitySequence, UUID riskSubjectId, String outcome) {}
 
     public record Entry(String accountId, String amount) {}
     public record CommunityCreated(UUID communityId) {}

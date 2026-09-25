@@ -20,6 +20,11 @@ public final class EvidenceAnalysis {
     public record Observation(UUID id, String source, UUID a, UUID b, BigDecimal amount,
                               BigDecimal quantity, String quantityUnit, String unitRef, boolean consent, Instant at) {}
     public record Result(Map<String,Object> summary, Map<String,String> exclusions, List<String> included) {}
+    /** What STIR's projection of osTRIS's identity continuity currently says about one account
+     * (ParticipantIndependenceService.Info, narrowed to what this pure function needs). osTRIS never
+     * affirmatively certifies independence - RELATED_CONTINUITY is the only positive signal; every
+     * other status (or no entry at all) means "not known to be related," never "confirmed independent." */
+    public record Independence(String status, String clusterRef) {}
 
     public static Result analyze(List<Observation> observations, Policy policy, BigDecimal basis,
                                  String quantityUnit, String unitRef, Instant cutoff) {
@@ -28,6 +33,11 @@ public final class EvidenceAnalysis {
     public static Result analyze(List<Observation> observations, Policy policy, BigDecimal basis,
                                  String quantityUnit, String unitRef, Instant cutoff,
                                  Map<UUID,String> finalExclusions) {
+        return analyze(observations,policy,basis,quantityUnit,unitRef,cutoff,finalExclusions,Map.of());
+    }
+    public static Result analyze(List<Observation> observations, Policy policy, BigDecimal basis,
+                                 String quantityUnit, String unitRef, Instant cutoff,
+                                 Map<UUID,String> finalExclusions, Map<UUID,Independence> independence) {
         Instant start=cutoff.minus(Duration.ofDays(policy.windowDays()));
         var excluded=new TreeMap<String,String>(); var included=new ArrayList<String>();
         var values=new ArrayList<BigDecimal>(); var participants=new HashMap<UUID,Integer>();
@@ -41,6 +51,11 @@ public final class EvidenceAnalysis {
             else if(o.amount()==null || o.quantity()==null || o.quantity().signum()<=0 ||
                     !Objects.equals(quantityUnit,o.quantityUnit()) || !Objects.equals(unitRef,o.unitRef())) reason="NOT_COMPARABLE";
             else if(o.a()==null || o.b()==null || o.a().equals(o.b())) reason="MISSING_COUNTERPARTY";
+            // Confirmed same-continuity-cluster counterparties are a self-trade in disguise - the
+            // Agreement stays a valid Agreement (never rewritten), but it is not independent market
+            // evidence, exactly like MISSING_COUNTERPARTY above for the literal-same-account case.
+            else if(clusterKey(independence,o.a()).equals(clusterKey(independence,o.b())) &&
+                    isRelated(independence,o.a())) reason="RELATED_PARTICIPANT_CLUSTER";
             if(reason!=null) { excluded.put(o.id().toString(),reason); continue; }
             included.add(o.id().toString());
             values.add(o.amount().multiply(basis).divide(o.quantity(),8,RoundingMode.HALF_UP));
@@ -61,14 +76,44 @@ public final class EvidenceAnalysis {
         if(policy.independenceChecksRequired() && pairs.size()<policy.minimumRelationships()) reasons.add("INSUFFICIENT_INDEPENDENT_RELATIONSHIPS");
         if(policy.concentrationChecksRequired() && pairShare.compareTo(policy.maximumPairShare())>0) reasons.add("REPEATED_RELATIONSHIP");
         if(newest==null || newest.isBefore(cutoff.minus(Duration.ofDays(policy.freshnessDays())))) reasons.add("STALE");
+
+        // Account diversity is not participant independence: among the accounts behind INCLUDED
+        // observations, collapse any confirmed-related accounts into one identity unit each; accounts
+        // with no data, or a non-RELATED_CONTINUITY status, stay their own unit - we correct diversity
+        // DOWN when we have positive evidence of relatedness, never UP by inventing independence.
+        var clusterTouches=new HashMap<String,Integer>(); var clusterMembers=new HashMap<String,Set<UUID>>();
+        int assessedAccounts=0;
+        for(var e:participants.entrySet()) {
+            String key=clusterKey(independence,e.getKey());
+            clusterTouches.merge(key,e.getValue(),Integer::sum);
+            clusterMembers.computeIfAbsent(key,k->new HashSet<>()).add(e.getKey());
+            if(independence.containsKey(e.getKey())) assessedAccounts++;
+        }
+        int relatedAccountClusters=(int)clusterMembers.values().stream().filter(m->m.size()>1).count();
+        int unknownIndependenceAccountCount=(int)participants.keySet().stream().filter(a->!isRelated(independence,a)).count();
+        int adjustedParticipantCount=clusterTouches.size();
+        BigDecimal clusterShare=n==0||clusterTouches.isEmpty()?BigDecimal.ZERO:
+            BigDecimal.valueOf(Collections.max(clusterTouches.values())).divide(BigDecimal.valueOf(n),4,RoundingMode.UP);
+        BigDecimal coverage=participants.isEmpty()?BigDecimal.ZERO:
+            BigDecimal.valueOf(assessedAccounts).multiply(BigDecimal.valueOf(100)).divide(BigDecimal.valueOf(participants.size()),0,RoundingMode.DOWN);
+        boolean haveCoverage=assessedAccounts>0;
+        if(policy.independenceChecksRequired() && haveCoverage && adjustedParticipantCount<policy.minimumParticipants())
+            reasons.add("INSUFFICIENT_INDEPENDENT_PARTICIPANTS");
+        if(policy.concentrationChecksRequired() && haveCoverage && clusterShare.compareTo(policy.maximumParticipantShare())>0)
+            reasons.add("HIGH_INDEPENDENT_PARTICIPANT_CONCENTRATION");
+
         boolean sufficient=reasons.isEmpty();
         Map<String,Object> out=new LinkedHashMap<>();
         out.put("status",sufficient?"SUFFICIENT_DATA":"INSUFFICIENT_DATA"); out.put("reasons",reasons);
         out.put("windowStart",start.toString()); out.put("windowEnd",cutoff.toString());
         out.put("method","AGREEMENTS_MEDIAN_IQR_V1"); out.put("source","AGREEMENT");
-        out.put("identityAssurance","ACCOUNTS_ONLY_RELATED_ACCOUNTS_UNKNOWN");
+        out.put("identityAssurance",haveCoverage?(unknownIndependenceAccountCount==0?"INDEPENDENCE_ASSURANCE_FULL_COVERAGE":"INDEPENDENCE_ASSURANCE_PARTIAL_COVERAGE"):"ACCOUNTS_ONLY_RELATED_ACCOUNTS_UNKNOWN");
         out.put("independenceChecksRequired",policy.independenceChecksRequired());
         out.put("concentrationChecksRequired",policy.concentrationChecksRequired());
+        out.put("independenceAssuranceCoveragePercent",sufficient?coverage.intValue():null);
+        out.put("adjustedIndependentParticipantCount",sufficient?adjustedParticipantCount:null);
+        out.put("relatedAccountClusters",sufficient?relatedAccountClusters:null);
+        out.put("unknownIndependenceAccountCount",sufficient?unknownIndependenceAccountCount:null);
         // Small cohorts expose neither exact counts nor freshness, ranges or concentration ratios.
         out.put("observationCount",sufficient?n:null); out.put("participantCount",sufficient?participants.size():null);
         out.put("newestObservation",sufficient?newest.toString():null);
@@ -96,4 +141,14 @@ public final class EvidenceAnalysis {
         int n=v.size(); return n%2==1?v.get(n/2):v.get(n/2-1).add(v.get(n/2)).divide(BigDecimal.valueOf(2));
     }
     private static String rounded(BigDecimal v) { return v.setScale(2,RoundingMode.HALF_UP).toPlainString(); }
+    private static boolean isRelated(Map<UUID,Independence> independence, UUID account) {
+        var info=independence.get(account); return info!=null && "RELATED_CONTINUITY".equals(info.status());
+    }
+    /** The identity unit an account counts toward: its confirmed cluster if known-related, otherwise
+     * itself - so two unrelated (or unassessed) accounts never collide, and confirmed-related
+     * accounts always collapse to the same key regardless of which one is looked up. */
+    private static String clusterKey(Map<UUID,Independence> independence, UUID account) {
+        var info=independence.get(account);
+        return (info!=null && "RELATED_CONTINUITY".equals(info.status()) && info.clusterRef()!=null) ? info.clusterRef() : account.toString();
+    }
 }

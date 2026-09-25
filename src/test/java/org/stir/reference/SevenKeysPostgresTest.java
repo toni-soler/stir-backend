@@ -10,6 +10,7 @@ import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.*;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.SingleConnectionDataSource;
+import org.stir.economic.OstrisClient;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.*;
 import static org.junit.jupiter.api.Assertions.*;
@@ -161,7 +162,7 @@ class SevenKeysPostgresTest {
         bootstrap();UUID p=proposal("minimumParticipantFloor",10);
         for(int i=1;i<=7;i++) signProposal(p,i);
         service.activate(p,noExecution());
-        var refs=new ReferenceService(jdbc);
+        var refs=new ReferenceService(jdbc,new ParticipantIndependenceService(jdbc,mock(OstrisClient.class)));
         UUID definition=(UUID)refs.create(user,new ReferenceController.DefinitionRequest("Service","one hour",Map.of(),
             java.math.BigDecimal.ONE,"hour")).get("id");
         assertEquals(10,refs.currentPolicy(definition).get("minimum_participants"));

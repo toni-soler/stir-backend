@@ -87,6 +87,95 @@ class EvidenceAnalysisTest {
         assertTrue(((List<?>)summary.get("reasons")).contains("LOW_DIVERSITY"));
         assertNull(summary.get("median"));
     }
+    // --- Participant independence: account diversity is not participant independence ---
+    EvidenceAnalysis.Result analyzeWithIndependence(List<EvidenceAnalysis.Observation> observations,Map<UUID,EvidenceAnalysis.Independence> independence) {
+        return EvidenceAnalysis.analyze(observations,policy,BigDecimal.ONE,"hour","unit",cutoff,Map.of(),independence);
+    }
+    @Test void withoutIndependenceDataIdentityAssuranceStaysTheHonestPlaceholder() {
+        var result=analyze(independent("10","11","12","13","14","15")).summary();
+        assertEquals("ACCOUNTS_ONLY_RELATED_ACCOUNTS_UNKNOWN",result.get("identityAssurance"));
+        assertEquals(0,result.get("independenceAssuranceCoveragePercent"),"zero coverage is meaningful information, not suppressed like a small cohort's counts");
+    }
+    @Test void confirmedSameClusterCounterpartyIsExcludedAsRelatedNotIndependentEvidence() {
+        // Scenario D: two different STIR accounts controlled by the same continuity cluster trading
+        // with each other is a self-trade in disguise - excluded per-observation, the Agreement's raw
+        // row is untouched (never rewritten, only excluded from this snapshot's eligible evidence).
+        UUID x1=UUID.randomUUID(),x2=UUID.randomUUID();
+        var selfTrade=observation(x1,x2,"9999",cutoff.minusSeconds(100),"AGREEMENT");
+        var independence=Map.of(x1,new EvidenceAnalysis.Independence("RELATED_CONTINUITY","cluster-a"),
+                                 x2,new EvidenceAnalysis.Independence("RELATED_CONTINUITY","cluster-a"));
+        var result=analyzeWithIndependence(List.of(selfTrade),independence);
+        assertEquals("RELATED_PARTICIPANT_CLUSTER",result.exclusions().get(selfTrade.id().toString()));
+        assertFalse(result.included().contains(selfTrade.id().toString()));
+    }
+    @Test void differentClustersTradingWithEachOtherAreStillIndependentEvidence() {
+        UUID x1=UUID.randomUUID(),x2=UUID.randomUUID();
+        var trade=observation(x1,x2,"10",cutoff.minusSeconds(100),"AGREEMENT");
+        var independence=Map.of(x1,new EvidenceAnalysis.Independence("RELATED_CONTINUITY","cluster-a"),
+                                 x2,new EvidenceAnalysis.Independence("RELATED_CONTINUITY","cluster-b"));
+        var result=analyzeWithIndependence(List.of(trade),independence);
+        assertNull(result.exclusions().get(trade.id().toString()));
+        assertTrue(result.included().contains(trade.id().toString()));
+    }
+    @Test void rawDiversityAtExactlyTheFloorIsCorrectedDownByAConfirmedCluster() {
+        // Scenario A/B: a1..a6 form a ring (6 distinct accounts, 6 relationships) - raw counting
+        // alone reads this as exactly meeting the diversity floor. a1 and a4 are never directly
+        // paired, so raw pair-based checks cannot see they are the same continuity cluster.
+        UUID a1=UUID.randomUUID(),a2=UUID.randomUUID(),a3=UUID.randomUUID(),a4=UUID.randomUUID(),a5=UUID.randomUUID(),a6=UUID.randomUUID();
+        UUID[] ring={a1,a2,a3,a4,a5,a6,a1};
+        var rows=new ArrayList<EvidenceAnalysis.Observation>();
+        for(int i=0;i<6;i++) rows.add(observation(ring[i],ring[i+1],String.valueOf(10+i),cutoff.minusSeconds(3600L*(i+1)),"AGREEMENT"));
+        var withoutIndependence=analyze(rows).summary();
+        assertEquals("SUFFICIENT_DATA",withoutIndependence.get("status"));
+        assertFalse(((List<?>)withoutIndependence.get("reasons")).contains("LOW_DIVERSITY"));
+        var independence=Map.of(a1,new EvidenceAnalysis.Independence("RELATED_CONTINUITY","cluster-a"),
+                                 a4,new EvidenceAnalysis.Independence("RELATED_CONTINUITY","cluster-a"));
+        var withIndependence=analyzeWithIndependence(rows,independence).summary();
+        assertEquals("INSUFFICIENT_DATA",withIndependence.get("status"));
+        assertTrue(((List<?>)withIndependence.get("reasons")).contains("INSUFFICIENT_INDEPENDENT_PARTICIPANTS"));
+        assertFalse(((List<?>)withIndependence.get("reasons")).contains("LOW_DIVERSITY"),"raw diversity never changes retroactively - only the adjusted count catches this");
+        // Below the floor, exact counts are suppressed the same way median/participantCount already
+        // are for any small cohort - a below-floor identity-assurance breakdown is not exempt from
+        // that privacy rule either. identityAssurance itself is not count-shaped, so - like the
+        // original ACCOUNTS_ONLY_RELATED_ACCOUNTS_UNKNOWN placeholder it replaces - it is not
+        // suppressed: only 2 of the 6 accounts (a1, a4) were ever assessed, so this stays PARTIAL,
+        // never FULL, even though those two happen to be the only related ones.
+        assertNull(withIndependence.get("adjustedIndependentParticipantCount"));
+        assertEquals("INDEPENDENCE_ASSURANCE_PARTIAL_COVERAGE",withIndependence.get("identityAssurance"));
+    }
+    @Test void splittingConcentrationAcrossTwoClusterMembersStillShowsAsConcentrated() {
+        // Scenario F: a single actor spreads its dominance across two accounts of the same cluster,
+        // each individually under the raw concentration floor - raw CONCENTRATED misses this, the
+        // cluster-aware check does not.
+        UUID x1=UUID.randomUUID(),x2=UUID.randomUUID();
+        var rows=new ArrayList<EvidenceAnalysis.Observation>();
+        for(int i=0;i<3;i++) rows.add(observation(x1,UUID.randomUUID(),"10",cutoff.minusSeconds(3600L*(i+1)),"AGREEMENT"));
+        for(int i=0;i<3;i++) rows.add(observation(x2,UUID.randomUUID(),"10",cutoff.minusSeconds(3600L*(i+4)),"AGREEMENT"));
+        for(int i=0;i<4;i++) rows.add(observation(UUID.randomUUID(),UUID.randomUUID(),"10",cutoff.minusSeconds(3600L*(i+7)),"AGREEMENT"));
+        var withoutIndependence=analyze(rows).summary();
+        assertFalse(((List<?>)withoutIndependence.get("reasons")).contains("CONCENTRATED"),"each account alone stays under the raw share floor");
+        var independence=Map.of(x1,new EvidenceAnalysis.Independence("RELATED_CONTINUITY","cluster-a"),
+                                 x2,new EvidenceAnalysis.Independence("RELATED_CONTINUITY","cluster-a"));
+        var withIndependence=analyzeWithIndependence(rows,independence).summary();
+        assertTrue(((List<?>)withIndependence.get("reasons")).contains("HIGH_INDEPENDENT_PARTICIPANT_CONCENTRATION"));
+    }
+    @Test void mixedKnownAndUnknownIndependenceIsNeverRoundedUpToFullIndependence() {
+        // Scenario C: 10 accounts with real independence data, several more with none at all -
+        // unknown accounts must never be silently counted as confirmed-independent.
+        var rows=new ArrayList<EvidenceAnalysis.Observation>();
+        UUID known1=UUID.randomUUID(),known2=UUID.randomUUID();
+        rows.add(observation(known1,UUID.randomUUID(),"10",cutoff.minusSeconds(3600),"AGREEMENT"));
+        rows.add(observation(known2,UUID.randomUUID(),"11",cutoff.minusSeconds(7200),"AGREEMENT"));
+        for(int i=0;i<4;i++) rows.add(observation(UUID.randomUUID(),UUID.randomUUID(),String.valueOf(12+i),cutoff.minusSeconds(3600L*(i+3)),"AGREEMENT"));
+        var independence=Map.of(known1,new EvidenceAnalysis.Independence("INDEPENDENCE_UNKNOWN",null),
+                                 known2,new EvidenceAnalysis.Independence("IDENTITY_CONTINUITY_PENDING",null));
+        var result=analyzeWithIndependence(rows,independence).summary();
+        assertEquals("SUFFICIENT_DATA",result.get("status"));
+        assertEquals(0,result.get("relatedAccountClusters"));
+        assertEquals("INDEPENDENCE_ASSURANCE_PARTIAL_COVERAGE",result.get("identityAssurance"));
+        assertEquals(result.get("participantCount"),result.get("adjustedIndependentParticipantCount"),
+            "no confirmed relation exists - the adjusted count must equal raw diversity, never invent either more or less independence");
+    }
     @Test void finalFindingExcludesOnlyFutureEvidenceAndLeavesRawAgreement() {
         var rows=new ArrayList<>(independent("10","11","12","13","1000","14"));
         var before=analyze(rows);

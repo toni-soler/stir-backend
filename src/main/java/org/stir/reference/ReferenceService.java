@@ -22,8 +22,9 @@ import static org.springframework.http.HttpStatus.*;
 @Service @Transactional
 public class ReferenceService {
     private final JdbcTemplate db;
+    private final ParticipantIndependenceService independence;
     private static final ObjectMapper JSON=new ObjectMapper();
-    public ReferenceService(JdbcTemplate db) { this.db=db; }
+    public ReferenceService(JdbcTemplate db, ParticipantIndependenceService independence) { this.db=db; this.independence=independence; }
     static UUID tenant() {
         var c=TenantContext.get(); if(c==null || c.getTenantId()==null) throw new AccessDeniedException("Tenant required");
         return c.getTenantId();
@@ -131,7 +132,23 @@ public class ReferenceService {
             ") e on true where c.tenant_id=? and c.definition_id=?",Timestamp.from(cutoff),tenant(),id);
         for(var item:cases) if("FINAL".equals(item.get("status")))
             finalExclusions.put((UUID)item.get("observation_id"),"FINAL_INTEGRITY_FINDING:"+item.get("signal_code"));
-        var result=EvidenceAnalysis.analyze(observations,policy,(BigDecimal)d.get("quantity_basis"),(String)d.get("quantity_unit"),(String)d.get("unit_ref"),cutoff,finalExclusions);
+        // Independence assurance is a pure read of STIR's own projection - never a live osTRIS call
+        // from here (ParticipantIndependenceService.refresh() is the only writer, and only a
+        // publisher can trigger it). A row older than this policy's own freshnessDays is treated as
+        // absent, same as if it never existed - never trusted past its own staleness policy.
+        var accounts=new LinkedHashSet<UUID>();
+        for(var o:observations) { if(o.a()!=null) accounts.add(o.a()); if(o.b()!=null) accounts.add(o.b()); }
+        var projections=independence.forUsers(tenant(),accounts,(int)p.get("freshness_days"),cutoff);
+        var independenceMap=new HashMap<UUID,EvidenceAnalysis.Independence>();
+        var independenceProvenance=new TreeMap<String,Object>();
+        for(var e:projections.entrySet()) {
+            var info=e.getValue();
+            independenceMap.put(e.getKey(),new EvidenceAnalysis.Independence(info.status(),info.clusterRef()));
+            independenceProvenance.put(e.getKey().toString(),Map.of("status",info.status(),
+                "clusterRef",info.clusterRef()==null?"":info.clusterRef(),
+                "communitySequence",info.communitySequence()==null?"":info.communitySequence()));
+        }
+        var result=EvidenceAnalysis.analyze(observations,policy,(BigDecimal)d.get("quantity_basis"),(String)d.get("quantity_unit"),(String)d.get("unit_ref"),cutoff,finalExclusions,independenceMap);
         var summary=new LinkedHashMap<>(result.summary()); UUID snapshotId=UUID.randomUUID();
         summary.put("id",snapshotId.toString()); summary.put("definitionId",id.toString()); summary.put("policyId",p.get("id").toString());
         summary.put("policyVersion",p.get("version")); summary.put("format","STIR-REFERENCE-EVIDENCE-JCS-1");
@@ -140,8 +157,11 @@ public class ReferenceService {
         summary.put("constitutionVersion",constitutional.get("version"));
         summary.put("constitutionDigest",constitutional.get("digest_sha256"));
         String json=canonical(summary);
-        // Private membership/exclusion evidence is never a community API response.
-        String evidence=canonical(Map.of("included",result.included(),"exclusions",result.exclusions()));
+        // Private membership/exclusion evidence is never a community API response. independenceProjections
+        // records exactly which projection (status + osTRIS community_sequence) this frozen snapshot used
+        // per account, so a later IdentityContinuity decision can never silently rewrite why an old
+        // snapshot looked the way it did - reconstruction replays this recorded state, not today's.
+        String evidence=canonical(Map.of("included",result.included(),"exclusions",result.exclusions(),"independenceProjections",independenceProvenance));
         db.update("insert into stir.reference_snapshot values (?,?,?,?,?,?,?,?,?)",snapshotId,tenant(),id,p.get("id"),Timestamp.from(cutoff),json,digest(json),evidence,Timestamp.from(Instant.now()));
         return publicSnapshot(one("select * from stir.reference_snapshot where tenant_id=? and id=?",tenant(),snapshotId));
     }

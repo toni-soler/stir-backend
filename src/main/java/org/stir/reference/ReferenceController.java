@@ -13,7 +13,8 @@ import org.springframework.web.bind.annotation.*;
 @RestController @RequestMapping("/api/stir/tenants/{tenantId}/references")
 public class ReferenceController {
     private final ReferenceService service;
-    public ReferenceController(ReferenceService service) { this.service=service; }
+    private final ParticipantIndependenceService independence;
+    public ReferenceController(ReferenceService service, ParticipantIndependenceService independence) { this.service=service; this.independence=independence; }
     @ModelAttribute public void tenant(@PathVariable UUID tenantId) {
         if(!tenantId.equals(ReferenceService.tenant())) throw new AccessDeniedException("Tenant context mismatch");
     }
@@ -58,6 +59,16 @@ public class ReferenceController {
     }
     @GetMapping("/agreements/{id}/context") @PreAuthorize("@permissionService.hasPermission('stir.agreements.read')")
     public Object context(@PathVariable UUID id,@AuthenticationPrincipal CurrentUser user) { return service.agreementContext(user,id); }
+    // Independence assurance: a publisher can only TRIGGER a refresh against osTRIS's own private
+    // continuity decision for this participant - osTRIS's response is persisted exactly as returned,
+    // never authored or altered here. A read-only participant() view stays permission-gated like
+    // observations()/evidence-manifest() above (private detail, not a mutation of anything).
+    @PostMapping("/participants/{userId}/independence-refresh") @PreAuthorize("@permissionService.hasPermission('stir.references.publish')")
+    public Object refreshIndependence(@PathVariable UUID userId,@AuthenticationPrincipal CurrentUser user) {
+        ReferenceService.requireCommunityAuthority(user); return independence.refresh(user,userId);
+    }
+    @GetMapping("/participants/{userId}/independence") @PreAuthorize("@permissionService.hasPermission('stir.references.publish')")
+    public Object participantIndependence(@PathVariable UUID userId) { return independence.view(ReferenceService.tenant(),userId); }
 
     public record DefinitionRequest(@NotBlank @Size(max=160) String name,@NotBlank @Size(max=500) String scope,
         @NotNull @Size(max=20) Map<@Size(max=60) String,@Size(max=200) String> attributes,
