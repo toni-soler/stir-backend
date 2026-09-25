@@ -7,6 +7,7 @@ import java.util.UUID;
 
 @Entity @Table(schema="stir", name="offer")
 public class Offer {
+    @Column(name="share_reference_observation", nullable=false) public boolean shareReferenceObservation;
     @Id public UUID id;
     @Column(name="tenant_id", nullable=false) public UUID tenantId;
     @Column(name="negotiation_id", nullable=false) public UUID negotiationId;

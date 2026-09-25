@@ -17,6 +17,7 @@ public class Listing {
     @Column(length=160) public String location;
     @Column(nullable=false, length=10) public String status;
     @Column(name="hidden_by_moderator", nullable=false) public boolean hiddenByModerator;
+    @Column(name="reference_definition_id") public UUID referenceDefinitionId;
     @Version public long version;
     @Column(name="created_at", nullable=false) public Instant createdAt;
     @Column(name="updated_at", nullable=false) public Instant updatedAt;

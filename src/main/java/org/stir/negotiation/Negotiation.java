@@ -13,6 +13,7 @@ public class Negotiation {
     @Column(name="owner_id", nullable=false) public UUID ownerId;
     @Column(nullable=false, length=10) public String status;
     @Column(name="last_offer_id") public UUID lastOfferId;
+    @Column(name="reference_definition_id") public UUID referenceDefinitionId;
     @Version public long version;
     @Column(name="created_at", nullable=false) public Instant createdAt;
     @Column(name="updated_at", nullable=false) public Instant updatedAt;

@@ -34,7 +34,7 @@ class NegotiationServiceTest {
         agreementRepository=mock(AgreementRepository.class);
         snapshotRepository=mock(AgreementSnapshotRepository.class);
         service=new NegotiationService(negotiationRepository,offerRepository,agreementRepository,listingRepository,
-            new AgreementSnapshotService(snapshotRepository), mock(NotificationService.class));
+            new AgreementSnapshotService(snapshotRepository), mock(NotificationService.class), mock(org.stir.reference.ReferenceAcceptanceAdapter.class));
 
         listing=new Listing(); listing.id=UUID.randomUUID(); listing.tenantId=tenant; listing.ownerId=owner;
         listing.status="ACTIVE"; listing.direction="OFFER"; listing.version=0;

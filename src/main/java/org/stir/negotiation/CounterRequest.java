@@ -10,7 +10,8 @@ public record CounterRequest(
     @PositiveOrZero BigDecimal proposedAmount,
     @Size(max=60) String proposedUnitRef,
     @Size(max=2000) String terms,
-    @NotNull @PositiveOrZero Long expectedVersion
+    @NotNull @PositiveOrZero Long expectedVersion,
+    boolean shareReferenceObservation
 ) {
-    OfferRequest offer() { return new OfferRequest(message,quantity,unitLabel,proposedAmount,proposedUnitRef,terms); }
+    OfferRequest offer() { return new OfferRequest(message,quantity,unitLabel,proposedAmount,proposedUnitRef,terms,shareReferenceObservation); }
 }

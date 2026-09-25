@@ -29,11 +29,12 @@ public class NegotiationService {
     private final ListingRepository listings;
     private final AgreementSnapshotService snapshotService;
     private final NotificationService notifications;
+    private final org.stir.reference.ReferenceAcceptanceAdapter references;
 
     public NegotiationService(NegotiationRepository negotiations, OfferRepository offers, AgreementRepository agreements,
-            ListingRepository listings, AgreementSnapshotService snapshotService, NotificationService notifications) {
+            ListingRepository listings, AgreementSnapshotService snapshotService, NotificationService notifications, org.stir.reference.ReferenceAcceptanceAdapter references) {
         this.negotiations=negotiations; this.offers=offers; this.agreements=agreements;
-        this.listings=listings; this.snapshotService=snapshotService; this.notifications=notifications;
+        this.listings=listings; this.snapshotService=snapshotService; this.notifications=notifications; this.references=references;
     }
 
     private UUID tenant() {
@@ -74,11 +75,13 @@ public class NegotiationService {
             .ifPresent(existing->{throw new ResponseStatusException(CONFLICT,"You already have an open negotiation on this listing");});
         var now=Instant.now();
         var negotiation=new Negotiation(); negotiation.id=UUID.randomUUID(); negotiation.tenantId=tenant;
+        negotiation.referenceDefinitionId=listing.referenceDefinitionId;
         negotiation.listingId=listingId; negotiation.initiatorId=initiator; negotiation.ownerId=listing.ownerId;
         negotiation.status="OPEN"; negotiation.createdAt=now; negotiation.updatedAt=now;
         negotiation=negotiations.saveAndFlush(negotiation);
         var offer=newOffer(negotiation,1,initiator,null,request);
         offer=offers.saveAndFlush(offer);
+        references.proposed(negotiation,offer);
         negotiation.lastOfferId=offer.id; negotiation.updatedAt=now;
         negotiation=negotiations.saveAndFlush(negotiation);
         notifications.create(tenant,listing.ownerId,"OFFER_RECEIVED","NEGOTIATION",negotiation.id);
@@ -96,6 +99,7 @@ public class NegotiationService {
         head.status="SUPERSEDED"; offers.saveAndFlush(head);
         var next=newOffer(negotiation,head.sequenceNumber+1,actor,head.id,request);
         next=offers.saveAndFlush(next);
+        references.proposed(negotiation,next);
         negotiation.lastOfferId=next.id; negotiation.updatedAt=Instant.now();
         negotiation=negotiations.saveAndFlush(negotiation);
         UUID otherParty=negotiation.initiatorId.equals(actor)?negotiation.ownerId:negotiation.initiatorId;
@@ -104,6 +108,9 @@ public class NegotiationService {
     }
 
     public AgreementDetail accept(CurrentUser user, UUID negotiationId, UUID offerId, long expectedVersion) {
+        return accept(user,negotiationId,offerId,expectedVersion,false);
+    }
+    public AgreementDetail accept(CurrentUser user, UUID negotiationId, UUID offerId, long expectedVersion, boolean shareReferenceObservation) {
         UUID tenant=tenant(), actor=actor(user);
         var negotiation=partyNegotiation(tenant,negotiationId,actor);
         if(!"OPEN".equals(negotiation.status)) throw new ResponseStatusException(CONFLICT,"Negotiation is closed");
@@ -130,6 +137,7 @@ public class NegotiationService {
         agreement.createdAt=Instant.now();
         agreement=agreements.saveAndFlush(agreement);
         var snapshot=snapshotService.freeze(agreement,negotiation,head,listing.direction);
+        references.accepted(negotiation,head,agreement,snapshot,shareReferenceObservation);
         notifications.create(tenant,head.authorId,"OFFER_ACCEPTED","AGREEMENT",agreement.id);
         return AgreementDetail.of(agreement,snapshot);
     }
@@ -162,6 +170,7 @@ public class NegotiationService {
         offer.authorId=author; offer.previousOfferId=previousOfferId;
         offer.message=request.message().trim(); offer.quantity=request.quantity(); offer.unitLabel=blank(request.unitLabel());
         offer.proposedAmount=request.proposedAmount(); offer.proposedUnitRef=blank(request.proposedUnitRef());
+        offer.shareReferenceObservation=request.shareReferenceObservation();
         offer.terms=blank(request.terms()); offer.status="PROPOSED"; offer.createdAt=Instant.now();
         return offer;
     }

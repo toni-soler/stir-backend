@@ -100,6 +100,10 @@ public class ListingService {
         var catalogs=catalogs();
         if(!catalogs.get("categories").contains(request.category()) || !catalogs.get("resourceKinds").contains(request.resourceKind()))
             throw new ResponseStatusException(BAD_REQUEST,"Unknown category or resource kind");
+        if(request.referenceDefinitionId()!=null && !Boolean.TRUE.equals(jdbc.queryForObject(
+            "select exists(select 1 from stir.reference_definition where tenant_id=? and id=?)",Boolean.class,tenant(),request.referenceDefinitionId())))
+            throw new ResponseStatusException(BAD_REQUEST,"Unknown reference definition");
+        listing.referenceDefinitionId=request.referenceDefinitionId();
         listing.direction=request.direction(); listing.title=request.title().trim(); listing.description=request.description().trim();
         listing.category=request.category(); listing.resourceKind=request.resourceKind();
         listing.location=request.location()==null?null:request.location().trim(); listing.updatedAt=Instant.now();

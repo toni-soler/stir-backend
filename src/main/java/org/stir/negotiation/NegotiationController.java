@@ -36,7 +36,7 @@ public class NegotiationController {
 
     @PostMapping("/{id}/accept") @PreAuthorize("@permissionService.hasPermission('stir.negotiations.update')")
     public AgreementDetail accept(@PathVariable UUID id, @AuthenticationPrincipal CurrentUser user, @Valid @RequestBody NegotiationActionRequest request) {
-        return service.accept(user,id,request.offerId(),request.expectedVersion());
+        return service.accept(user,id,request.offerId(),request.expectedVersion(),request.shareReferenceObservation());
     }
     @PostMapping("/{id}/decline") @PreAuthorize("@permissionService.hasPermission('stir.negotiations.update')")
     public NegotiationDetail decline(@PathVariable UUID id, @AuthenticationPrincipal CurrentUser user, @Valid @RequestBody NegotiationActionRequest request) {

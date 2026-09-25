@@ -5,5 +5,6 @@ import java.util.UUID;
 
 public record NegotiationActionRequest(
     UUID offerId,
-    @NotNull @PositiveOrZero Long expectedVersion
+    @NotNull @PositiveOrZero Long expectedVersion,
+    boolean shareReferenceObservation
 ) {}
