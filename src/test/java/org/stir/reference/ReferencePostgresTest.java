@@ -134,6 +134,10 @@ class ReferencePostgresTest {
         jdbc.queryForObject("select set_config('app.tenant_id',?,true)",String.class,UUID.randomUUID().toString());
         assertEquals(0,jdbc.queryForObject("select count(*) from stir.reference_context_snapshot",Integer.class));
     }
+    @Test void bindingExposesTheTenantsOwnCommunityForGovernanceBootstrap() {
+        UUID community=jdbc.queryForObject("select community_id from stir.marketplace_economic_binding where tenant_id=?",UUID.class,tenant);
+        assertEquals(community,service.binding().get("communityId"));
+    }
     @Test void immutableTriggerAlsoProtectsAgainstAnOwnerUpdate() throws Exception {
         UUID id=definition();jdbc.execute("reset role");
         var savepoint=connection.setSavepoint();

@@ -44,6 +44,10 @@ public class ReferenceService {
     public List<Map<String,Object>> definitions() {
         return db.queryForList("select * from stir.reference_definition where tenant_id=? order by name,id limit 200",tenant());
     }
+    public Map<String,Object> binding() {
+        var row=one("select community_id from stir.marketplace_economic_binding where tenant_id=?",tenant());
+        return Map.of("communityId",row.get("community_id"));
+    }
     public Map<String,Object> definition(UUID id) {
         return one("select * from stir.reference_definition where tenant_id=? and id=?",tenant(),id);
     }

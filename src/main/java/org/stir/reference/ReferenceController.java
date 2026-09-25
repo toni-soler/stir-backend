@@ -18,6 +18,8 @@ public class ReferenceController {
     }
     @GetMapping @PreAuthorize("@permissionService.hasPermission('stir.references.read')")
     public Object definitions() { return service.definitions(); }
+    @GetMapping("/community") @PreAuthorize("@permissionService.hasPermission('stir.references.read')")
+    public Object community() { return service.binding(); }
     @GetMapping("/publish-access") @PreAuthorize("@permissionService.hasPermission('stir.references.publish')")
     public Object access() { return Map.of("allowed",true); }
     @PostMapping @PreAuthorize("@permissionService.hasPermission('stir.references.propose')")

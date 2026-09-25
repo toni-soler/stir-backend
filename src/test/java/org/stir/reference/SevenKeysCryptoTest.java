@@ -25,4 +25,16 @@ class SevenKeysCryptoTest {
             SevenKeysCrypto.message(SevenKeysCrypto.GUARDIAN_DOMAIN,payload)));
         assertThrows(IllegalArgumentException.class,()->SevenKeysCrypto.requireSignature(publicKey,signature+"=",message));
     }
+    // Golden vector shared with stir-frontend's governance-signer.test.mjs: same fixed constitution
+    // object, same RFC 8785 canonical bytes and SHA-256 hex on both sides of the JCS boundary.
+    @Test void initialConstitutionDigestMatchesTheSharedFrontendVector() {
+        String canonical=new String(
+            org.stir.negotiation.CanonicalJson.canonicalBytes(SevenKeysService.initialConstitution()),java.nio.charset.StandardCharsets.UTF_8);
+        assertEquals("{\"concentrationChecksRequired\":true,\"constitutionalThreshold\":7,\"guardianMayGovern\":false,"+
+            "\"historyImmutable\":true,\"independenceChecksRequired\":true,\"maximumParticipantShareCeiling\":\"0.50\","+
+            "\"minimumObservationFloor\":5,\"minimumParticipantFloor\":6,\"provenanceRequired\":true,\"schema\":\"STIR-MARKET-CONSTITUTION-1\"}",
+            canonical);
+        assertEquals("8254b12fba01df8b2527a3583302573fe8a47d6ba30696003731e22200c79da5",
+            org.stir.negotiation.CanonicalJson.sha256Hex(canonical.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+    }
 }
