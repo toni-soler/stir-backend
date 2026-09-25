@@ -8,20 +8,34 @@ import java.util.*;
 public final class EvidenceAnalysis {
     private EvidenceAnalysis() {}
     public record Policy(int windowDays, int minimumObservations, int minimumParticipants,
-                         BigDecimal maximumParticipantShare, int freshnessDays) {}
+                         BigDecimal maximumParticipantShare, int freshnessDays,
+                         int minimumRelationships, BigDecimal maximumPairShare,
+                         boolean independenceChecksRequired, boolean concentrationChecksRequired) {
+        public Policy(int windowDays,int minimumObservations,int minimumParticipants,
+                      BigDecimal maximumParticipantShare,int freshnessDays) {
+            this(windowDays,minimumObservations,minimumParticipants,maximumParticipantShare,
+                 freshnessDays,3,new BigDecimal("0.50"),true,true);
+        }
+    }
     public record Observation(UUID id, String source, UUID a, UUID b, BigDecimal amount,
                               BigDecimal quantity, String quantityUnit, String unitRef, boolean consent, Instant at) {}
     public record Result(Map<String,Object> summary, Map<String,String> exclusions, List<String> included) {}
 
     public static Result analyze(List<Observation> observations, Policy policy, BigDecimal basis,
                                  String quantityUnit, String unitRef, Instant cutoff) {
+        return analyze(observations,policy,basis,quantityUnit,unitRef,cutoff,Map.of());
+    }
+    public static Result analyze(List<Observation> observations, Policy policy, BigDecimal basis,
+                                 String quantityUnit, String unitRef, Instant cutoff,
+                                 Map<UUID,String> finalExclusions) {
         Instant start=cutoff.minus(Duration.ofDays(policy.windowDays()));
         var excluded=new TreeMap<String,String>(); var included=new ArrayList<String>();
         var values=new ArrayList<BigDecimal>(); var participants=new HashMap<UUID,Integer>();
-        var pairs=new HashMap<String,Integer>(); Instant newest=null;
+        var pairs=new HashMap<String,Integer>(); var days=new HashSet<java.time.LocalDate>(); Instant newest=null;
         for(var o:observations) {
             String reason=null;
-            if(!"AGREEMENT".equals(o.source())) reason="SOURCE_NOT_AGREEMENT";
+            if(finalExclusions.containsKey(o.id())) reason=finalExclusions.get(o.id());
+            else if(!"AGREEMENT".equals(o.source())) reason="SOURCE_NOT_AGREEMENT";
             else if(!o.consent()) reason="NO_BILATERAL_CONSENT";
             else if(o.at().isBefore(start) || !o.at().isBefore(cutoff)) reason="OUTSIDE_WINDOW";
             else if(o.amount()==null || o.quantity()==null || o.quantity().signum()<=0 ||
@@ -33,6 +47,7 @@ public final class EvidenceAnalysis {
             participants.merge(o.a(),1,Integer::sum); participants.merge(o.b(),1,Integer::sum);
             String pair=o.a().compareTo(o.b())<0?o.a()+":"+o.b():o.b()+":"+o.a();
             pairs.merge(pair,1,Integer::sum);
+            days.add(o.at().atZone(ZoneOffset.UTC).toLocalDate());
             if(newest==null || newest.isBefore(o.at())) newest=o.at();
         }
         Collections.sort(values); Collections.sort(included);
@@ -41,8 +56,10 @@ public final class EvidenceAnalysis {
         BigDecimal pairShare=n==0?BigDecimal.ZERO:BigDecimal.valueOf(Collections.max(pairs.values())).divide(BigDecimal.valueOf(n),4,RoundingMode.UP);
         var reasons=new ArrayList<String>();
         if(n<policy.minimumObservations()) reasons.add("SMALL_SAMPLE");
-        if(participants.size()<policy.minimumParticipants()) reasons.add("LOW_DIVERSITY");
-        if(share.compareTo(policy.maximumParticipantShare())>0) reasons.add("CONCENTRATED");
+        if(policy.independenceChecksRequired() && participants.size()<policy.minimumParticipants()) reasons.add("LOW_DIVERSITY");
+        if(policy.concentrationChecksRequired() && share.compareTo(policy.maximumParticipantShare())>0) reasons.add("CONCENTRATED");
+        if(policy.independenceChecksRequired() && pairs.size()<policy.minimumRelationships()) reasons.add("INSUFFICIENT_INDEPENDENT_RELATIONSHIPS");
+        if(policy.concentrationChecksRequired() && pairShare.compareTo(policy.maximumPairShare())>0) reasons.add("REPEATED_RELATIONSHIP");
         if(newest==null || newest.isBefore(cutoff.minus(Duration.ofDays(policy.freshnessDays())))) reasons.add("STALE");
         boolean sufficient=reasons.isEmpty();
         Map<String,Object> out=new LinkedHashMap<>();
@@ -50,16 +67,30 @@ public final class EvidenceAnalysis {
         out.put("windowStart",start.toString()); out.put("windowEnd",cutoff.toString());
         out.put("method","AGREEMENTS_MEDIAN_IQR_V1"); out.put("source","AGREEMENT");
         out.put("identityAssurance","ACCOUNTS_ONLY_RELATED_ACCOUNTS_UNKNOWN");
+        out.put("independenceChecksRequired",policy.independenceChecksRequired());
+        out.put("concentrationChecksRequired",policy.concentrationChecksRequired());
         // Small cohorts expose neither exact counts nor freshness, ranges or concentration ratios.
         out.put("observationCount",sufficient?n:null); out.put("participantCount",sufficient?participants.size():null);
         out.put("newestObservation",sufficient?newest.toString():null);
         out.put("maximumParticipantShare",sufficient?share.toPlainString():null);
         out.put("maximumPairShare",sufficient?pairShare.toPlainString():null);
+        out.put("relationshipCount",sufficient?pairs.size():null);
+        out.put("distinctUtcDays",sufficient?days.size():null);
+        out.put("maximumSingleObservationMedianShift",sufficient?rounded(maxLeaveOneOutShift(values)):null);
         out.put("median",sufficient?rounded(median(values)):null);
         out.put("lowerQuartile",sufficient?rounded(values.get((n-1)/4)):null);
         out.put("upperQuartile",sufficient?rounded(values.get(3*(n-1)/4)):null);
         out.put("filters",List.of("BILATERAL_CONSENT","EXACT_QUANTITY_UNIT","EXACT_ACCOUNT_UNIT","UTC_DAILY_CUTOFF","NO_OUTLIER_TRIMMING"));
         return new Result(Collections.unmodifiableMap(out),excluded,included);
+    }
+    private static BigDecimal maxLeaveOneOutShift(List<BigDecimal> sorted) {
+        if(sorted.size()<2) return BigDecimal.ZERO;
+        BigDecimal baseline=median(sorted), maximum=BigDecimal.ZERO;
+        for(int i=0;i<sorted.size();i++) {
+            var without=new ArrayList<>(sorted); without.remove(i);
+            maximum=maximum.max(median(without).subtract(baseline).abs());
+        }
+        return maximum;
     }
     private static BigDecimal median(List<BigDecimal> v) {
         int n=v.size(); return n%2==1?v.get(n/2):v.get(n/2-1).add(v.get(n/2)).divide(BigDecimal.valueOf(2));

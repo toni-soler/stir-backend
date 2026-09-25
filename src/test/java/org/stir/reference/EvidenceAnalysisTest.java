@@ -60,4 +60,43 @@ class EvidenceAnalysisTest {
         var bad=new EvidenceAnalysis.Observation(o.id(),o.source(),o.a(),o.b(),o.amount(),o.quantity(),"kg","euro",true,o.at());
         assertEquals("NOT_COMPARABLE",analyze(List.of(bad)).exclusions().get(bad.id().toString()));
     }
+    @Test void twentyRepeatedDealsFailWhileTwentyDistinctRelationsCanDescribeValues() {
+        UUID a=UUID.randomUUID(),b=UUID.randomUUID();
+        var repeated=new ArrayList<EvidenceAnalysis.Observation>();
+        for(int i=0;i<20;i++) repeated.add(observation(a,b,"50",cutoff.minusSeconds(3600L*(i+1)),"AGREEMENT"));
+        var r=analyze(repeated).summary();
+        assertEquals("INSUFFICIENT_DATA",r.get("status"));
+        assertTrue(((List<?>)r.get("reasons")).contains("REPEATED_RELATIONSHIP"));
+        var distinct=new ArrayList<EvidenceAnalysis.Observation>();
+        for(int i=0;i<20;i++) distinct.add(observation(UUID.randomUUID(),UUID.randomUUID(),"50",cutoff.minusSeconds(7200L*(i+1)),"AGREEMENT"));
+        var d=analyze(distinct).summary();
+        assertEquals("SUFFICIENT_DATA",d.get("status"));
+        assertEquals(20,d.get("relationshipCount"));
+        assertTrue(((Number)d.get("distinctUtcDays")).intValue()>1);
+        assertEquals("0.00",d.get("maximumSingleObservationMedianShift"));
+    }
+    @Test void circularActivityIsVisibleAsRepeatedRelationsWithoutCallingItFraud() {
+        UUID a=UUID.randomUUID(),b=UUID.randomUUID(),c=UUID.randomUUID();
+        var rows=new ArrayList<EvidenceAnalysis.Observation>();
+        for(int i=0;i<18;i++) {
+            UUID first=i%3==0?a:i%3==1?b:c,second=i%3==0?b:i%3==1?c:a;
+            rows.add(observation(first,second,"10",cutoff.minusSeconds(3600L*(i+1)),"AGREEMENT"));
+        }
+        var summary=analyze(rows).summary();
+        assertEquals("INSUFFICIENT_DATA",summary.get("status"));
+        assertTrue(((List<?>)summary.get("reasons")).contains("LOW_DIVERSITY"));
+        assertNull(summary.get("median"));
+    }
+    @Test void finalFindingExcludesOnlyFutureEvidenceAndLeavesRawAgreement() {
+        var rows=new ArrayList<>(independent("10","11","12","13","1000","14"));
+        var before=analyze(rows);
+        assertEquals(6,before.included().size());
+        var finalOnly=EvidenceAnalysis.analyze(rows,policy,BigDecimal.ONE,"hour","unit",cutoff,
+            Map.of(rows.get(4).id(),"FINAL_INTEGRITY_FINDING:RELATED_PARTICIPANT_CLUSTER"));
+        assertEquals(6,rows.size());
+        assertEquals(5,finalOnly.included().size());
+        assertEquals("FINAL_INTEGRITY_FINDING:RELATED_PARTICIPANT_CLUSTER",
+            finalOnly.exclusions().get(rows.get(4).id().toString()));
+        assertEquals("12.00",finalOnly.summary().get("median"));
+    }
 }

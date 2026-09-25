@@ -42,7 +42,14 @@ public class ReferenceController {
         @NotNull @Positive @Digits(integer=14,fraction=4) BigDecimal quantityBasis,@NotBlank @Size(max=40) String quantityUnit) {}
     public record PolicyRequest(@Min(7) @Max(365) int windowDays,@Min(5) @Max(10000) int minimumObservations,
         @Min(6) @Max(10000) int minimumParticipants,@NotNull @DecimalMin("0.1") @DecimalMax("0.5") BigDecimal maximumParticipantShare,
-        @Min(1) @Max(365) int freshnessDays,@NotBlank @Size(max=2000) String explanation) {}
+        @Min(1) @Max(365) int freshnessDays,@NotBlank @Size(max=2000) String explanation,
+        Boolean independenceChecksRequired,Boolean concentrationChecksRequired,Boolean provenanceRequired,Boolean forceReference) {
+        public PolicyRequest(int windowDays,int minimumObservations,int minimumParticipants,
+            BigDecimal maximumParticipantShare,int freshnessDays,String explanation) {
+            this(windowDays,minimumObservations,minimumParticipants,maximumParticipantShare,freshnessDays,
+                explanation,null,null,null,null);
+        }
+    }
     public record ProposalRequest(@NotNull @Pattern(regexp="VALUE|BAND|CONVENTION|QUALITATIVE") String kind,
         @PositiveOrZero @Digits(integer=16,fraction=2) BigDecimal lowerValue,@PositiveOrZero @Digits(integer=16,fraction=2) BigDecimal upperValue,
         @NotBlank @Size(max=2000) String explanation,@NotBlank @Size(max=100) String origin,@Min(1) @Max(365) int validDays) {}

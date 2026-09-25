@@ -51,6 +51,12 @@ public class ReferenceService {
         definition(id);
         db.queryForList("select pg_advisory_xact_lock(hashtextextended(?,0))",tenant()+":"+id);
     }
+    private Map<String,Object> constitution(UUID community) {
+        var rows=db.queryForList("select version,canonical_json,digest_sha256 from stir.market_constitution where tenant_id=? and community_id=? order by version desc limit 1",tenant(),community);
+        if(rows.isEmpty()) return Map.of("version",0,"canonical_json",canonical(SevenKeysService.initialConstitution()),
+            "digest_sha256",digest(canonical(SevenKeysService.initialConstitution())));
+        return rows.getFirst();
+    }
     public Map<String,Object> create(CurrentUser user, ReferenceController.DefinitionRequest r) {
         var binding=one("select community_id,unit_id from stir.marketplace_economic_binding where tenant_id=?",tenant());
         UUID id=UUID.randomUUID();
@@ -58,11 +64,24 @@ public class ReferenceService {
         db.update("insert into stir.reference_definition values (?,?,?,?,?,?,?,?,?,?,?,?)",id,tenant(),binding.get("community_id"),binding.get("unit_id"),
             r.name().trim(),r.scope().trim(),canonical(new TreeMap<>(r.attributes())),r.quantityBasis(),r.quantityUnit().trim(),
             binding.get("unit_id").toString(),actor(user),Timestamp.from(Instant.now()));
-        policy(user,id,new ReferenceController.PolicyRequest(90,5,6,new BigDecimal("0.40"),30,"Initial conservative agreement-only policy"));
+        var constitution=constitution((UUID)binding.get("community_id"));
+        var bounds=parse((String)constitution.get("canonical_json"));
+        policy(user,id,new ReferenceController.PolicyRequest(90,
+            Math.max(5,((Number)bounds.get("minimumObservationFloor")).intValue()),
+            Math.max(6,((Number)bounds.get("minimumParticipantFloor")).intValue()),
+            new BigDecimal("0.40"),30,"Initial conservative agreement-only policy"));
         return definition(id);
     }
     public Map<String,Object> policy(CurrentUser user,UUID id,ReferenceController.PolicyRequest r) {
         lock(id); if(r.freshnessDays()>r.windowDays()) throw new ResponseStatusException(BAD_REQUEST,"Freshness exceeds window");
+        if(r.independenceChecksRequired()!=null || r.concentrationChecksRequired()!=null ||
+           r.provenanceRequired()!=null || r.forceReference()!=null)
+            throw new ResponseStatusException(CONFLICT,"Protected mutations require constitutional authority");
+        var d=definition(id); var bounds=parse((String)constitution((UUID)d.get("community_id")).get("canonical_json"));
+        if(r.minimumObservations()<((Number)bounds.get("minimumObservationFloor")).intValue() ||
+           r.minimumParticipants()<((Number)bounds.get("minimumParticipantFloor")).intValue() ||
+           r.maximumParticipantShare().compareTo(new BigDecimal((String)bounds.get("maximumParticipantShareCeiling")))>0)
+            throw new ResponseStatusException(CONFLICT,"Operational policy crosses constitutional bounds");
         int version=db.queryForObject("select coalesce(max(version),0)+1 from stir.reference_policy where tenant_id=? and definition_id=?",Integer.class,tenant(),id);
         UUID policy=UUID.randomUUID();
         db.update("insert into stir.reference_policy values (?,?,?,?,?,?,?,?,?,?,?,?)",policy,tenant(),id,version,r.windowDays(),r.minimumObservations(),r.minimumParticipants(),r.maximumParticipantShare(),r.freshnessDays(),r.explanation(),actor(user),Timestamp.from(Instant.now()));
@@ -80,13 +99,26 @@ public class ReferenceService {
         var observations=db.query("select * from stir.reference_observation where tenant_id=? and definition_id=? and observed_at < ? order by id",
             (rs,n)->new EvidenceAnalysis.Observation(rs.getObject("id",UUID.class),rs.getString("source"),rs.getObject("participant_a",UUID.class),rs.getObject("participant_b",UUID.class),
                 rs.getBigDecimal("amount"),rs.getBigDecimal("quantity"),rs.getString("quantity_unit"),rs.getString("unit_ref"),rs.getBoolean("aggregate_consent"),rs.getTimestamp("observed_at").toInstant()),tenant(),id,Timestamp.from(cutoff));
-        var policy=new EvidenceAnalysis.Policy((int)p.get("window_days"),(int)p.get("minimum_observations"),(int)p.get("minimum_participants"),(BigDecimal)p.get("maximum_participant_share"),(int)p.get("freshness_days"));
-        var result=EvidenceAnalysis.analyze(observations,policy,(BigDecimal)d.get("quantity_basis"),(String)d.get("quantity_unit"),(String)d.get("unit_ref"),cutoff);
+        var constitutional=constitution((UUID)d.get("community_id"));
+        var bounds=parse((String)constitutional.get("canonical_json"));
+        var policy=new EvidenceAnalysis.Policy((int)p.get("window_days"),(int)p.get("minimum_observations"),(int)p.get("minimum_participants"),
+            (BigDecimal)p.get("maximum_participant_share"),(int)p.get("freshness_days"),3,new BigDecimal("0.50"),
+            Boolean.TRUE.equals(bounds.get("independenceChecksRequired")),Boolean.TRUE.equals(bounds.get("concentrationChecksRequired")));
+        // Only FINAL case events before the daily cutoff can change eligibility; raw Agreement remains untouched.
+        var finalExclusions=new HashMap<UUID,String>();
+        var cases=db.queryForList("select c.observation_id,c.signal_code,e.status from stir.market_integrity_case c join lateral ("+
+            "select status from stir.market_integrity_case_event where tenant_id=c.tenant_id and case_id=c.id and recorded_at < ? order by sequence desc limit 1"+
+            ") e on true where c.tenant_id=? and c.definition_id=?",Timestamp.from(cutoff),tenant(),id);
+        for(var item:cases) if("FINAL".equals(item.get("status")))
+            finalExclusions.put((UUID)item.get("observation_id"),"FINAL_INTEGRITY_FINDING:"+item.get("signal_code"));
+        var result=EvidenceAnalysis.analyze(observations,policy,(BigDecimal)d.get("quantity_basis"),(String)d.get("quantity_unit"),(String)d.get("unit_ref"),cutoff,finalExclusions);
         var summary=new LinkedHashMap<>(result.summary()); UUID snapshotId=UUID.randomUUID();
         summary.put("id",snapshotId.toString()); summary.put("definitionId",id.toString()); summary.put("policyId",p.get("id").toString());
         summary.put("policyVersion",p.get("version")); summary.put("format","STIR-REFERENCE-EVIDENCE-JCS-1");
         summary.put("minimumObservations",policy.minimumObservations()); summary.put("minimumParticipants",policy.minimumParticipants());
         summary.put("maximumAllowedParticipantShare",policy.maximumParticipantShare().toPlainString());
+        summary.put("constitutionVersion",constitutional.get("version"));
+        summary.put("constitutionDigest",constitutional.get("digest_sha256"));
         String json=canonical(summary);
         // Private membership/exclusion evidence is never a community API response.
         String evidence=canonical(Map.of("included",result.included(),"exclusions",result.exclusions()));

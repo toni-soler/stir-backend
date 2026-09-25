@@ -65,6 +65,47 @@ class ReferencePostgresTest {
         var p=service.propose(user,id,new ReferenceController.ProposalRequest("VALUE",new BigDecimal("100"),new BigDecimal("100"),"Community chooses a value different from the median","Assembly",10));
         service.publish(user,(UUID)p.get("id"),"Independent normative decision");assertEquals(new BigDecimal("100.00"),service.current(id).get("lower_value"));
     }
+    @Test void finalIntegrityFindingChangesEligibilityWithoutRewritingRawAgreement() {
+        UUID id=definition(); var d=service.definition(id); UUID extreme=null;
+        for(int i=0;i<6;i++) {
+            UUID source=UUID.randomUUID();
+            service.record(id,"AGREEMENT",source,UUID.randomUUID(),UUID.randomUUID(),
+                BigDecimal.valueOf(i==5?1000:10+i),BigDecimal.ONE,"loaf",(String)d.get("unit_ref"),true,
+                Instant.now().minus(Duration.ofDays(2)));
+            if(i==5) extreme=jdbc.queryForObject("select id from stir.reference_observation where tenant_id=? and source_id=?",UUID.class,tenant,source);
+        }
+        UUID caseId=UUID.randomUUID();Instant yesterday=Instant.now().minus(Duration.ofDays(1));
+        jdbc.update("insert into stir.market_integrity_case values (?,?,?,?,?,?,?,?,?)",caseId,tenant,id,extreme,
+            "RELATED_PARTICIPANT_CLUSTER","Reviewed","{\"refs\":[\"private-1\"]}",userId,Timestamp.from(yesterday));
+        jdbc.update("insert into stir.market_integrity_case_event values (?,?,?,?,?,?,?,?)",UUID.randomUUID(),tenant,caseId,
+            "FINAL","Reviewed",UUID.randomUUID(),Timestamp.from(yesterday),1);
+        var result=service.snapshot(id);
+        assertEquals(6,jdbc.queryForObject("select count(*) from stir.reference_observation where tenant_id=? and definition_id=?",Integer.class,tenant,id));
+        assertEquals(5,result.get("observationCount"));
+        assertEquals("12.00",result.get("median"));
+        assertFalse(result.toString().contains("private-1"));
+        String manifest=jdbc.queryForObject("select evidence_json from stir.reference_snapshot where tenant_id=? and id=?",String.class,
+            tenant,UUID.fromString((String)result.get("id")));
+        assertTrue(manifest.contains("FINAL_INTEGRITY_FINDING:RELATED_PARTICIPANT_CLUSTER"));
+    }
+    @Test void anomalyMustBeReviewedAndCanBeDismissedWithoutExcludingTheAgreement() {
+        UUID id=definition();var d=service.definition(id);UUID source=UUID.randomUUID();
+        service.record(id,"AGREEMENT",source,UUID.randomUUID(),UUID.randomUUID(),BigDecimal.TEN,
+            BigDecimal.ONE,"loaf",(String)d.get("unit_ref"),true,Instant.now().minus(Duration.ofDays(1)));
+        UUID observation=jdbc.queryForObject("select id from stir.reference_observation where tenant_id=? and source_id=?",UUID.class,tenant,source);
+        var integrity=new MarketIntegrityService(jdbc);
+        var signal=integrity.signal(user,new MarketIntegrityService.SignalRequest(observation,"OUTLIER_PENDING_REVIEW",
+            "A high value needs review",List.of("private-case-1")));
+        UUID caseId=(UUID)signal.get("id");
+        assertEquals("SIGNAL",signal.get("status"));
+        assertThrows(Exception.class,()->integrity.decide(user,caseId,new MarketIntegrityService.DecisionRequest("FINAL","Premature")));
+        integrity.decide(user,caseId,new MarketIntegrityService.DecisionRequest("UNDER_REVIEW","Examining context"));
+        assertThrows(Exception.class,()->integrity.decide(user,caseId,new MarketIntegrityService.DecisionRequest("FINAL","Self approval")));
+        CurrentUser reviewer=mock(CurrentUser.class);when(reviewer.getUserId()).thenReturn(UUID.randomUUID());
+        assertEquals("DISMISSED",integrity.decide(reviewer,caseId,new MarketIntegrityService.DecisionRequest("DISMISSED","No finding")).get("status"));
+        assertEquals(3,integrity.history(caseId).size());
+        assertEquals(1,jdbc.queryForObject("select count(*) from stir.reference_observation where tenant_id=? and id=?",Integer.class,tenant,observation));
+    }
     @Test void noSampleCannotBePublishedAsStatisticallySupportedValue() {
         UUID id=definition();assertThrows(Exception.class,()->service.propose(user,id,new ReferenceController.ProposalRequest("VALUE",BigDecimal.TEN,BigDecimal.TEN,"Unsupported","Statistics",10)));
     }
