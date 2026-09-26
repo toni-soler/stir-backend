@@ -76,11 +76,15 @@ public class ReferenceController {
     public record PolicyRequest(@Min(7) @Max(365) int windowDays,@Min(5) @Max(10000) int minimumObservations,
         @Min(6) @Max(10000) int minimumParticipants,@NotNull @DecimalMin("0.1") @DecimalMax("0.5") BigDecimal maximumParticipantShare,
         @Min(1) @Max(365) int freshnessDays,@NotBlank @Size(max=2000) String explanation,
-        Boolean independenceChecksRequired,Boolean concentrationChecksRequired,Boolean provenanceRequired,Boolean forceReference) {
+        Boolean independenceChecksRequired,Boolean concentrationChecksRequired,Boolean provenanceRequired,Boolean forceReference,
+        // Ordinary field, not constitutional-authority-protected like the four above: how much of
+        // this reference's evidence must carry real independence assurance before it counts as
+        // sufficient. Null (the default) means no minimum - fully backward compatible.
+        @Min(0) @Max(100) Integer minimumIndependenceCoveragePercent) {
         public PolicyRequest(int windowDays,int minimumObservations,int minimumParticipants,
             BigDecimal maximumParticipantShare,int freshnessDays,String explanation) {
             this(windowDays,minimumObservations,minimumParticipants,maximumParticipantShare,freshnessDays,
-                explanation,null,null,null,null);
+                explanation,null,null,null,null,null);
         }
     }
     public record ProposalRequest(@NotNull @Pattern(regexp="VALUE|BAND|CONVENTION|QUALITATIVE") String kind,

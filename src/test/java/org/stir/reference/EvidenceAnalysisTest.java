@@ -176,6 +176,59 @@ class EvidenceAnalysisTest {
         assertEquals(result.get("participantCount"),result.get("adjustedIndependentParticipantCount"),
             "no confirmed relation exists - the adjusted count must equal raw diversity, never invent either more or less independence");
     }
+    // --- Hardening: cluster-aware relationship diversity ---
+    @Test void hubTradingWithThreeAccountsOfTheSameClusterDoesNotCountAsThreeIndependentRelationships() {
+        // X trades with Y1,Y2,Y3 - all confirmed the same continuity cluster - and separately with
+        // Y4, unrelated. Raw counting sees 4 distinct relationships; only 2 are real.
+        UUID x=UUID.randomUUID(),y1=UUID.randomUUID(),y2=UUID.randomUUID(),y3=UUID.randomUUID(),y4=UUID.randomUUID();
+        var rows=List.of(observation(x,y1,"10",cutoff.minusSeconds(3600),"AGREEMENT"),observation(x,y2,"11",cutoff.minusSeconds(7200),"AGREEMENT"),
+            observation(x,y3,"12",cutoff.minusSeconds(10800),"AGREEMENT"),observation(x,y4,"13",cutoff.minusSeconds(14400),"AGREEMENT"));
+        var lenientPolicy=new EvidenceAnalysis.Policy(90,4,5,new BigDecimal("1.00"),30,3,new BigDecimal("1.00"),true,true);
+        var withoutIndependence=EvidenceAnalysis.analyze(rows,lenientPolicy,BigDecimal.ONE,"hour","unit",cutoff).summary();
+        assertEquals("SUFFICIENT_DATA",withoutIndependence.get("status"));
+        assertEquals(4,withoutIndependence.get("relationshipCount"),"raw counting sees 4 distinct pairs");
+        var independence=Map.of(y1,new EvidenceAnalysis.Independence("RELATED_CONTINUITY","cluster-a"),
+                                 y2,new EvidenceAnalysis.Independence("RELATED_CONTINUITY","cluster-a"),
+                                 y3,new EvidenceAnalysis.Independence("RELATED_CONTINUITY","cluster-a"));
+        var result=EvidenceAnalysis.analyze(rows,lenientPolicy,BigDecimal.ONE,"hour","unit",cutoff,Map.of(),independence).summary();
+        assertEquals("INSUFFICIENT_DATA",result.get("status"));
+        assertTrue(((List<?>)result.get("reasons")).contains("INSUFFICIENT_ASSURED_RELATIONSHIPS"),result.get("reasons").toString());
+        assertFalse(((List<?>)result.get("reasons")).contains("INSUFFICIENT_INDEPENDENT_RELATIONSHIPS"),"raw relationship count is untouched - only the cluster-aware check catches this");
+    }
+    @Test void rawAssuredAndUnknownRelationshipCountsAreReportedSeparatelyNeverConflated() {
+        UUID x=UUID.randomUUID(),known=UUID.randomUUID(),unknown=UUID.randomUUID();
+        var rows=new ArrayList<>(independent("10","11","12","13")); // 4 fully-unassessed independent pairs
+        rows.add(observation(x,known,"14",cutoff.minusSeconds(3600),"AGREEMENT"));   // both sides assessed, distinct clusters -> assured independent
+        rows.add(observation(x,unknown,"15",cutoff.minusSeconds(7200),"AGREEMENT")); // x assessed, unknown unassessed -> unknown relationship
+        var independence=Map.of(x,new EvidenceAnalysis.Independence("RELATED_CONTINUITY","cluster-a"),
+                                 known,new EvidenceAnalysis.Independence("RELATED_CONTINUITY","cluster-b"));
+        var result=analyzeWithIndependence(rows,independence).summary();
+        assertEquals("SUFFICIENT_DATA",result.get("status"));
+        assertEquals(6,result.get("relationshipCount"),"raw: 6 distinct pairs total");
+        assertEquals(1,result.get("assuredIndependentRelationships"),"only x-known had both sides assessed and distinct");
+        assertEquals(5,result.get("unknownRelationships"),"the 4 fully-independent pairs plus x-unknown all have an unassessed side");
+    }
+    // --- Hardening: refresh coverage integrity ---
+    @Test void policyRequiringMinimumCoverageProducesAReproducibleReasonNotAnEstimate() {
+        var rows=new ArrayList<EvidenceAnalysis.Observation>();
+        UUID known1=UUID.randomUUID(),known2=UUID.randomUUID();
+        rows.add(observation(known1,UUID.randomUUID(),"10",cutoff.minusSeconds(3600),"AGREEMENT"));
+        rows.add(observation(known2,UUID.randomUUID(),"11",cutoff.minusSeconds(7200),"AGREEMENT"));
+        for(int i=0;i<4;i++) rows.add(observation(UUID.randomUUID(),UUID.randomUUID(),String.valueOf(12+i),cutoff.minusSeconds(3600L*(i+3)),"AGREEMENT"));
+        var independence=Map.of(known1,new EvidenceAnalysis.Independence("RELATED_CONTINUITY","cluster-x"),
+                                 known2,new EvidenceAnalysis.Independence("INDEPENDENCE_UNKNOWN",null));
+        // 2 of 12 accounts assessed = 16% actual coverage (BigDecimal rounds down).
+        var strict=new EvidenceAnalysis.Policy(90,5,6,new BigDecimal("0.40"),30,3,new BigDecimal("0.50"),true,true,50);
+        var strictResult=EvidenceAnalysis.analyze(rows,strict,BigDecimal.ONE,"hour","unit",cutoff,Map.of(),independence).summary();
+        assertTrue(((List<?>)strictResult.get("reasons")).contains("INSUFFICIENT_INDEPENDENCE_COVERAGE"),strictResult.get("reasons").toString());
+        assertEquals(50,strictResult.get("minimumIndependenceCoveragePercent"));
+        var lax=new EvidenceAnalysis.Policy(90,5,6,new BigDecimal("0.40"),30,3,new BigDecimal("0.50"),true,true,10);
+        var laxResult=EvidenceAnalysis.analyze(rows,lax,BigDecimal.ONE,"hour","unit",cutoff,Map.of(),independence).summary();
+        assertFalse(((List<?>)laxResult.get("reasons")).contains("INSUFFICIENT_INDEPENDENCE_COVERAGE"));
+        var unset=analyzeWithIndependence(rows,independence).summary();
+        assertFalse(((List<?>)unset.get("reasons")).contains("INSUFFICIENT_INDEPENDENCE_COVERAGE"),"no minimum configured (null) - never blocks by default");
+        assertNull(unset.get("minimumIndependenceCoveragePercent"));
+    }
     @Test void finalFindingExcludesOnlyFutureEvidenceAndLeavesRawAgreement() {
         var rows=new ArrayList<>(independent("10","11","12","13","1000","14"));
         var before=analyze(rows);

@@ -86,14 +86,33 @@ public class ReferenceService {
             binding.get("unit_id").toString(),actor(user),Timestamp.from(Instant.now()));
         var constitution=constitution((UUID)binding.get("community_id"));
         var bounds=parse((String)constitution.get("canonical_json"));
-        policy(user,id,new ReferenceController.PolicyRequest(90,
+        // Bypasses the ordinary-governance gate deliberately: this is the definition's structural
+        // initial policy, not a policy CHANGE decision - nothing to vote on yet, the definition
+        // itself doesn't exist until this same transaction commits.
+        policyDirect(user,id,new ReferenceController.PolicyRequest(90,
             Math.max(5,((Number)bounds.get("minimumObservationFloor")).intValue()),
             Math.max(6,((Number)bounds.get("minimumParticipantFloor")).intValue()),
             new BigDecimal("0.40"),30,"Initial conservative agreement-only policy"));
         return definition(id);
     }
+    /** When ordinary governance is enabled for a community, a direct publisher call must be
+     * refused - the value/policy decision belongs to an approved ordinary_proposal instead
+     * (ORDINARY_GOVERNANCE.md). */
+    private void requireDirectMutationAllowed(UUID communityId) {
+        var rows=db.queryForList("select ordinary_governance_enabled from stir.community_governance_settings where tenant_id=? and community_id=?",tenant(),communityId);
+        if(!rows.isEmpty() && Boolean.TRUE.equals(rows.getFirst().get("ordinary_governance_enabled")))
+            throw new ResponseStatusException(CONFLICT,"Ordinary governance is active for this community; act through an approved proposal instead");
+    }
     public Map<String,Object> policy(CurrentUser user,UUID id,ReferenceController.PolicyRequest r) {
         requireCommunityAuthority(user);
+        requireDirectMutationAllowed((UUID)definition(id).get("community_id"));
+        return policyDirect(user,id,r);
+    }
+    /** Bypasses the ordinary-governance gate - only for create()'s own structural initial policy
+     * (nothing to vote on yet, the definition doesn't exist until this same transaction commits)
+     * and OrdinaryGovernanceService.execute()'s approved-proposal path (re-verified there). Never
+     * call this from an ordinary controller-facing entry point. */
+    Map<String,Object> policyDirect(CurrentUser user,UUID id,ReferenceController.PolicyRequest r) {
         lock(id); if(r.freshnessDays()>r.windowDays()) throw new ResponseStatusException(BAD_REQUEST,"Freshness exceeds window");
         if(r.independenceChecksRequired()!=null || r.concentrationChecksRequired()!=null ||
            r.provenanceRequired()!=null || r.forceReference()!=null)
@@ -105,7 +124,7 @@ public class ReferenceService {
             throw new ResponseStatusException(CONFLICT,"Operational policy crosses constitutional bounds");
         int version=db.queryForObject("select coalesce(max(version),0)+1 from stir.reference_policy where tenant_id=? and definition_id=?",Integer.class,tenant(),id);
         UUID policy=UUID.randomUUID();
-        db.update("insert into stir.reference_policy values (?,?,?,?,?,?,?,?,?,?,?,?)",policy,tenant(),id,version,r.windowDays(),r.minimumObservations(),r.minimumParticipants(),r.maximumParticipantShare(),r.freshnessDays(),r.explanation(),actor(user),Timestamp.from(Instant.now()));
+        db.update("insert into stir.reference_policy values (?,?,?,?,?,?,?,?,?,?,?,?,?)",policy,tenant(),id,version,r.windowDays(),r.minimumObservations(),r.minimumParticipants(),r.maximumParticipantShare(),r.freshnessDays(),r.explanation(),actor(user),Timestamp.from(Instant.now()),r.minimumIndependenceCoveragePercent());
         return one("select * from stir.reference_policy where tenant_id=? and id=?",tenant(),policy);
     }
     public Map<String,Object> currentPolicy(UUID id) {
@@ -124,7 +143,8 @@ public class ReferenceService {
         var bounds=parse((String)constitutional.get("canonical_json"));
         var policy=new EvidenceAnalysis.Policy((int)p.get("window_days"),(int)p.get("minimum_observations"),(int)p.get("minimum_participants"),
             (BigDecimal)p.get("maximum_participant_share"),(int)p.get("freshness_days"),3,new BigDecimal("0.50"),
-            Boolean.TRUE.equals(bounds.get("independenceChecksRequired")),Boolean.TRUE.equals(bounds.get("concentrationChecksRequired")));
+            Boolean.TRUE.equals(bounds.get("independenceChecksRequired")),Boolean.TRUE.equals(bounds.get("concentrationChecksRequired")),
+            (Integer)p.get("minimum_independence_coverage_percent"));
         // Only FINAL case events before the daily cutoff can change eligibility; raw Agreement remains untouched.
         var finalExclusions=new HashMap<UUID,String>();
         var cases=db.queryForList("select c.observation_id,c.signal_code,e.status from stir.market_integrity_case c join lateral ("+
@@ -206,6 +226,14 @@ public class ReferenceService {
     }
     public Map<String,Object> publish(CurrentUser user,UUID proposal,String decision) {
         requireCommunityAuthority(user);
+        UUID definitionId=(UUID)one("select definition_id from stir.reference_proposal where tenant_id=? and id=?",tenant(),proposal).get("definition_id");
+        requireDirectMutationAllowed((UUID)definition(definitionId).get("community_id"));
+        return publishDirect(user,proposal,decision);
+    }
+    /** Bypasses the ordinary-governance gate - only for OrdinaryGovernanceService.execute()'s
+     * approved-proposal path (re-verified there). Never call this from an ordinary controller-facing
+     * entry point. */
+    Map<String,Object> publishDirect(CurrentUser user,UUID proposal,String decision) {
         var p=one("select * from stir.reference_proposal where tenant_id=? and id=?",tenant(),proposal);
         UUID id=(UUID)p.get("definition_id"); lock(id);
         var prior=db.queryForList("select id from stir.community_reference where tenant_id=? and proposal_id=?",tenant(),proposal);

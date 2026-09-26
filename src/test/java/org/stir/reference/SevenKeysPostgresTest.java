@@ -169,7 +169,7 @@ class SevenKeysPostgresTest {
         assertThrows(Exception.class,()->refs.policy(user,definition,new ReferenceController.PolicyRequest(90,5,6,
             new java.math.BigDecimal("0.40"),30,"Try lowering bound")));
         assertThrows(Exception.class,()->refs.policy(user,definition,new ReferenceController.PolicyRequest(90,8,10,
-            new java.math.BigDecimal("0.40"),30,"Attempt protected bypass",false,null,null,null)));
+            new java.math.BigDecimal("0.40"),30,"Attempt protected bypass",false,null,null,null,null)));
         assertEquals(1,refs.currentPolicy(definition).get("version"));
     }
     @Test void controllerReplacementNeverTrustsClientClaimOfFinality() throws Exception {

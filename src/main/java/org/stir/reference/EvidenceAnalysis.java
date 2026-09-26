@@ -10,11 +10,19 @@ public final class EvidenceAnalysis {
     public record Policy(int windowDays, int minimumObservations, int minimumParticipants,
                          BigDecimal maximumParticipantShare, int freshnessDays,
                          int minimumRelationships, BigDecimal maximumPairShare,
-                         boolean independenceChecksRequired, boolean concentrationChecksRequired) {
+                         boolean independenceChecksRequired, boolean concentrationChecksRequired,
+                         Integer minimumIndependenceCoveragePercent) {
         public Policy(int windowDays,int minimumObservations,int minimumParticipants,
                       BigDecimal maximumParticipantShare,int freshnessDays) {
             this(windowDays,minimumObservations,minimumParticipants,maximumParticipantShare,
-                 freshnessDays,3,new BigDecimal("0.50"),true,true);
+                 freshnessDays,3,new BigDecimal("0.50"),true,true,null);
+        }
+        public Policy(int windowDays,int minimumObservations,int minimumParticipants,
+                      BigDecimal maximumParticipantShare,int freshnessDays,
+                      int minimumRelationships,BigDecimal maximumPairShare,
+                      boolean independenceChecksRequired,boolean concentrationChecksRequired) {
+            this(windowDays,minimumObservations,minimumParticipants,maximumParticipantShare,freshnessDays,
+                 minimumRelationships,maximumPairShare,independenceChecksRequired,concentrationChecksRequired,null);
         }
     }
     public record Observation(UUID id, String source, UUID a, UUID b, BigDecimal amount,
@@ -102,6 +110,42 @@ public final class EvidenceAnalysis {
         if(policy.concentrationChecksRequired() && haveCoverage && clusterShare.compareTo(policy.maximumParticipantShare())>0)
             reasons.add("HIGH_INDEPENDENT_PARTICIPANT_CONCENTRATION");
 
+        // Cluster-aware relationship diversity: relationshipCount/REPEATED_RELATIONSHIP above count
+        // raw (a,b) account pairs - several raw pairs sharing a confirmed cluster on one side (one
+        // real actor trading through many accounts against genuinely different counterparties) can
+        // look like several independent relationships when it is really one. Collapse each raw pair
+        // to its cluster-pair key; a pair can never collapse with another unless BOTH ends have
+        // resolved to a shared cluster (any pair that WAS same-cluster-on-both-sides was already
+        // excluded per-observation above as RELATED_PARTICIPANT_CLUSTER, so every entry counted here
+        // is already a genuine two-sided relationship, just possibly duplicated across raw accounts).
+        var clusterPairs=new HashMap<String,Integer>(); int unknownRelationships=0;
+        for(var entry:pairs.entrySet()) {
+            String[] parts=entry.getKey().split(":",2); UUID a=UUID.fromString(parts[0]),b=UUID.fromString(parts[1]);
+            String ka=clusterKey(independence,a),kb=clusterKey(independence,b);
+            String clusterPairKey=ka.compareTo(kb)<0?ka+":"+kb:kb+":"+ka;
+            clusterPairs.merge(clusterPairKey,entry.getValue(),Integer::sum);
+            if(!independence.containsKey(a) || !independence.containsKey(b)) unknownRelationships++;
+        }
+        int clusterAdjustedRelationships=clusterPairs.size();
+        // Reporting metrics, kept honestly distinct (never conflate the two): a pair only counts as
+        // "assured independent" when BOTH sides were actually assessed - by construction it cannot
+        // be a same-cluster pair either, since that was already excluded per-observation above. Any
+        // pair with an unassessed side is "unknown," full stop - never silently folded into either.
+        int assuredIndependentRelationships=pairs.size()-unknownRelationships;
+        BigDecimal clusterPairShare=n==0||clusterPairs.isEmpty()?BigDecimal.ZERO:
+            BigDecimal.valueOf(Collections.max(clusterPairs.values())).divide(BigDecimal.valueOf(n),4,RoundingMode.UP);
+        if(policy.independenceChecksRequired() && haveCoverage && clusterAdjustedRelationships<policy.minimumRelationships())
+            reasons.add("INSUFFICIENT_ASSURED_RELATIONSHIPS");
+        if(policy.concentrationChecksRequired() && haveCoverage && clusterPairShare.compareTo(policy.maximumPairShare())>0)
+            reasons.add("HIGH_ASSURED_RELATIONSHIP_CONCENTRATION");
+
+        // Refresh coverage integrity: a policy MAY require a minimum share of the evidence to have
+        // real independence assurance behind it. Falling short is always an explicit, reproducible
+        // reason - never a silent best-effort estimate, and unknown coverage is never quietly
+        // treated as if it were confirmed independent (UNKNOWN != INDEPENDENT).
+        if(policy.minimumIndependenceCoveragePercent()!=null && coverage.intValue()<policy.minimumIndependenceCoveragePercent())
+            reasons.add("INSUFFICIENT_INDEPENDENCE_COVERAGE");
+
         boolean sufficient=reasons.isEmpty();
         Map<String,Object> out=new LinkedHashMap<>();
         out.put("status",sufficient?"SUFFICIENT_DATA":"INSUFFICIENT_DATA"); out.put("reasons",reasons);
@@ -114,6 +158,10 @@ public final class EvidenceAnalysis {
         out.put("adjustedIndependentParticipantCount",sufficient?adjustedParticipantCount:null);
         out.put("relatedAccountClusters",sufficient?relatedAccountClusters:null);
         out.put("unknownIndependenceAccountCount",sufficient?unknownIndependenceAccountCount:null);
+        out.put("clusterAdjustedRelationships",sufficient?clusterAdjustedRelationships:null);
+        out.put("assuredIndependentRelationships",sufficient?assuredIndependentRelationships:null);
+        out.put("unknownRelationships",sufficient?unknownRelationships:null);
+        out.put("minimumIndependenceCoveragePercent",policy.minimumIndependenceCoveragePercent());
         // Small cohorts expose neither exact counts nor freshness, ranges or concentration ratios.
         out.put("observationCount",sufficient?n:null); out.put("participantCount",sufficient?participants.size():null);
         out.put("newestObservation",sufficient?newest.toString():null);

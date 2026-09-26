@@ -155,6 +155,24 @@
       "fieldKey": null,
       "labelKey": "stir.refPublish",
       "resourceKey": "stir.references"
+    },
+    {
+      "actionKey": "vote",
+      "apiPath": "/api/stir/tenants/{tenantId}/references/governance/ordinary",
+      "code": "stir.governance.vote",
+      "description": "propose and vote in ordinary community governance",
+      "fieldKey": null,
+      "labelKey": "stir.governanceVote",
+      "resourceKey": "stir.governance"
+    },
+    {
+      "actionKey": "manage",
+      "apiPath": "/api/stir/tenants/{tenantId}/references/governance/ordinary",
+      "code": "stir.governance.manage",
+      "description": "manage the ordinary governance electorate and voting policy",
+      "fieldKey": null,
+      "labelKey": "stir.governanceManage",
+      "resourceKey": "stir.governance"
     }
   ]
 }
