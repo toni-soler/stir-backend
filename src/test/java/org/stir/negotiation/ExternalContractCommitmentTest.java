@@ -20,4 +20,15 @@ class ExternalContractCommitmentTest {
             AgreementSnapshotService.fields(agreement, negotiation, offer, "OFFER", "nonce")));
         assertNotEquals(original, changed);
     }
+    @Test void additiveSnapshotViewExposesOpaqueFieldsAndAcceptsOlderSnapshots() {
+        var snapshot = new AgreementSnapshot();
+        snapshot.schemaVersion = 3;
+        snapshot.canonicalJson = "{\"externalContractNamespace\":\"example.market\",\"externalContractDigest\":\"" + "a".repeat(64) + "\"}";
+        var view = AgreementSnapshotView.of(snapshot);
+        assertEquals("example.market", view.externalContractNamespace());
+        assertEquals("a".repeat(64), view.externalContractDigest());
+        snapshot.schemaVersion = 2;
+        snapshot.canonicalJson = "{\"terms\":null}";
+        assertNull(AgreementSnapshotView.of(snapshot).externalContractDigest());
+    }
 }

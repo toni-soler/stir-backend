@@ -1,6 +1,7 @@
 package org.stir.negotiation;
 
 import java.time.Instant;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 /**
  * Party-visible view of a frozen snapshot. canonicalJson intentionally carries the embedded nonce
@@ -11,8 +12,19 @@ import java.time.Instant;
  * AgreementService/AgreementController only ever resolve this for negotiation.initiatorId/ownerId
  * (404 otherwise), so a stranger never reaches this DTO at all.
  */
-public record AgreementSnapshotView(int schemaVersion, String canonicalJson, String digestSha256, Instant createdAt) {
+public record AgreementSnapshotView(int schemaVersion, String canonicalJson, String digestSha256, Instant createdAt,
+                                    String externalContractNamespace, String externalContractDigest) {
+    private static final ObjectMapper JSON = new ObjectMapper();
     static AgreementSnapshotView of(AgreementSnapshot snapshot) {
-        return new AgreementSnapshotView(snapshot.schemaVersion, snapshot.canonicalJson, snapshot.digestSha256, snapshot.createdAt);
+        try {
+            var canonical = JSON.readTree(snapshot.canonicalJson);
+            return new AgreementSnapshotView(snapshot.schemaVersion, snapshot.canonicalJson, snapshot.digestSha256,
+                snapshot.createdAt, text(canonical, "externalContractNamespace"), text(canonical, "externalContractDigest"));
+        } catch (java.io.IOException ex) {
+            throw new IllegalStateException("Stored agreement snapshot is not valid JSON", ex);
+        }
+    }
+    private static String text(com.fasterxml.jackson.databind.JsonNode node, String key) {
+        return node.path(key).isTextual() ? node.path(key).asText() : null;
     }
 }
