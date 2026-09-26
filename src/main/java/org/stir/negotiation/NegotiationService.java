@@ -165,6 +165,8 @@ public class NegotiationService {
     }
 
     private Offer newOffer(Negotiation negotiation, int sequence, UUID author, UUID previousOfferId, OfferRequest request) {
+        if ((request.externalContractNamespace()==null) != (request.externalContractDigest()==null))
+            throw new ResponseStatusException(BAD_REQUEST,"External contract namespace and digest must be supplied together");
         var offer=new Offer(); offer.id=UUID.randomUUID(); offer.tenantId=negotiation.tenantId;
         offer.negotiationId=negotiation.id; offer.listingId=negotiation.listingId; offer.sequenceNumber=sequence;
         offer.authorId=author; offer.previousOfferId=previousOfferId;
@@ -172,6 +174,8 @@ public class NegotiationService {
         offer.proposedAmount=request.proposedAmount(); offer.proposedUnitRef=blank(request.proposedUnitRef());
         offer.shareReferenceObservation=request.shareReferenceObservation();
         offer.terms=blank(request.terms()); offer.status="PROPOSED"; offer.createdAt=Instant.now();
+        offer.externalContractNamespace=request.externalContractNamespace();
+        offer.externalContractDigest=request.externalContractDigest();
         return offer;
     }
     private String blank(String value) { return (value==null || value.isBlank()) ? null : value.trim(); }

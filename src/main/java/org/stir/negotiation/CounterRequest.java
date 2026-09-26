@@ -11,7 +11,9 @@ public record CounterRequest(
     @Size(max=60) String proposedUnitRef,
     @Size(max=2000) String terms,
     @NotNull @PositiveOrZero Long expectedVersion,
-    boolean shareReferenceObservation
+    boolean shareReferenceObservation,
+    @Pattern(regexp="[a-z][a-z0-9._-]{2,79}") String externalContractNamespace,
+    @Pattern(regexp="[0-9a-f]{64}") String externalContractDigest
 ) {
-    OfferRequest offer() { return new OfferRequest(message,quantity,unitLabel,proposedAmount,proposedUnitRef,terms,shareReferenceObservation); }
+    OfferRequest offer() { return new OfferRequest(message,quantity,unitLabel,proposedAmount,proposedUnitRef,terms,shareReferenceObservation,externalContractNamespace,externalContractDigest); }
 }

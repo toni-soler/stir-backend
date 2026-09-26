@@ -10,9 +10,11 @@ public record OfferRequest(
     @PositiveOrZero BigDecimal proposedAmount,
     @Size(max=60) String proposedUnitRef,
     @Size(max=2000) String terms,
-    boolean shareReferenceObservation
+    boolean shareReferenceObservation,
+    @Pattern(regexp="[a-z][a-z0-9._-]{2,79}") String externalContractNamespace,
+    @Pattern(regexp="[0-9a-f]{64}") String externalContractDigest
  ) {
     public OfferRequest(String message,BigDecimal quantity,String unitLabel,BigDecimal proposedAmount,String proposedUnitRef,String terms) {
-        this(message,quantity,unitLabel,proposedAmount,proposedUnitRef,terms,false);
+        this(message,quantity,unitLabel,proposedAmount,proposedUnitRef,terms,false,null,null);
     }
 }

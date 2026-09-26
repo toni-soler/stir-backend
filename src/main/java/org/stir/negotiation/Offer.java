@@ -21,6 +21,8 @@ public class Offer {
     @Column(name="proposed_amount", precision=18, scale=2) public BigDecimal proposedAmount;
     @Column(name="proposed_unit_ref", length=60) public String proposedUnitRef;
     @Column(length=2000) public String terms;
+    @Column(name="external_contract_namespace", length=80) public String externalContractNamespace;
+    @Column(name="external_contract_digest", length=64) public String externalContractDigest;
     @Column(nullable=false, length=10) public String status;
     @Column(name="created_at", nullable=false) public Instant createdAt;
 }

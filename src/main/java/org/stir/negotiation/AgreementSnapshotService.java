@@ -18,7 +18,7 @@ import org.springframework.stereotype.Service;
  */
 @Service
 public class AgreementSnapshotService {
-    public static final int SCHEMA_VERSION = 2;
+    public static final int SCHEMA_VERSION = 3;
     private final AgreementSnapshotRepository snapshots;
     private final SecureRandom random = new SecureRandom();
 
@@ -58,6 +58,8 @@ public class AgreementSnapshotService {
         fields.put("proposedAmount", offer.proposedAmount == null ? null : offer.proposedAmount.toPlainString());
         fields.put("proposedUnitRef", offer.proposedUnitRef);
         fields.put("terms", offer.terms);
+        fields.put("externalContractNamespace", offer.externalContractNamespace);
+        fields.put("externalContractDigest", offer.externalContractDigest);
         // Explicit, unambiguous economic direction frozen at accept time (never re-derived at
         // commit time - see NegotiationService.accept()); null on both means no economic execution.
         fields.put("payerUserId", agreement.payerUserId == null ? null : agreement.payerUserId.toString());
