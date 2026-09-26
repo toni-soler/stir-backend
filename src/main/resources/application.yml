@@ -34,6 +34,7 @@ storage:
   bucket: ${STORAGE_BUCKET:stir-attachments}
 stir:
   instance:
+    version: 0.5.0-rc1
     site-name: ${STIR_SITE_NAME:STIR}
     public-base-url: ${STIR_PUBLIC_BASE_URL:http://localhost:8089}
     support-contact: ${STIR_SUPPORT_CONTACT:}
