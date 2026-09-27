@@ -250,7 +250,7 @@ public class ReferenceService {
      * own participants/amount, gated behind stir.references.publish precisely because of that. */
     public List<Map<String,Object>> observations(UUID id) {
         definition(id);
-        return db.queryForList("select o.id,o.source,o.source_id,o.participant_a,o.participant_b,o.amount,o.quantity,"+
+        return db.queryForList("select o.id,o.source,o.source_id,o.economic_lineage_id,o.participant_a,o.participant_b,o.amount,o.quantity,"+
             "o.quantity_unit,o.unit_ref,o.aggregate_consent,o.observed_at,c.id as case_id,e.status as case_status,c.signal_code "+
             "from stir.reference_observation o "+
             "left join lateral (select id,signal_code from stir.market_integrity_case where tenant_id=o.tenant_id and observation_id=o.id order by created_at desc limit 1) c on true "+
