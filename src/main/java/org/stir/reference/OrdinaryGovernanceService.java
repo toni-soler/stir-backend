@@ -26,7 +26,10 @@ import static org.springframework.http.HttpStatus.*;
 public class OrdinaryGovernanceService {
     private final JdbcTemplate db;
     private final ReferenceService reference;
-    public OrdinaryGovernanceService(JdbcTemplate db, ReferenceService reference) { this.db=db; this.reference=reference; }
+    private final RetentionService retention;
+    public OrdinaryGovernanceService(JdbcTemplate db, ReferenceService reference, RetentionService retention) {
+        this.db=db; this.reference=reference; this.retention=retention;
+    }
 
     private Map<String,Object> one(String sql,Object...args) {
         var rows=db.queryForList(sql,args); if(rows.isEmpty()) throw new ResponseStatusException(NOT_FOUND,"Not found"); return rows.getFirst();
@@ -130,6 +133,12 @@ public class OrdinaryGovernanceService {
         var policy=reference.currentPolicy(definitionId);
         return ReferenceService.digest(ReferenceService.canonical(Map.of("policyId",policy.get("id").toString(),"policyVersion",policy.get("version"))));
     }
+    /** Retention policy is community-scoped, not definition-scoped - its own staleness digest,
+     * parallel to policyStateDigest() above but never confused with it. */
+    private String retentionPolicyStateDigest(UUID community) {
+        var policy=retention.currentPolicy(community);
+        return ReferenceService.digest(ReferenceService.canonical(Map.of("retentionPolicyVersion",policy.get("version"))));
+    }
     public Map<String,Object> proposePublishReference(CurrentUser user,UUID definitionId,UUID referenceProposalId) {
         ReferenceService.requireCommunityAuthority(user);
         UUID actor=ReferenceService.actor(user);
@@ -157,6 +166,17 @@ public class OrdinaryGovernanceService {
         payloadMap.put("minimumIndependenceCoveragePercent",r.minimumIndependenceCoveragePercent());
         String payload=ReferenceService.canonical(payloadMap);
         UUID proposal=freezeProposal(user,community,definitionId,"REFERENCE_POLICY_CHANGE",null,payload,policyStateDigest(definitionId));
+        return proposal(proposal);
+    }
+    /** Retention policy is community-scoped, so this proposal type carries no definition_id -
+     * unlike PUBLISH_REFERENCE/REFERENCE_POLICY_CHANGE, community_id (already NOT NULL on every
+     * ordinary_proposal row) is the only scoping this proposal needs. */
+    public Map<String,Object> proposeRetentionPolicyChange(CurrentUser user,UUID community,RetentionService.PolicyRequest r) {
+        ReferenceService.requireCommunityAuthority(user);
+        UUID actor=ReferenceService.actor(user);
+        requireElector(community,actor);
+        String payload=ReferenceService.canonical(Map.of("retentionPeriodDays",r.retentionPeriodDays(),"explanation",r.explanation()));
+        UUID proposal=freezeProposal(user,community,null,"RETENTION_POLICY_CHANGE",null,payload,retentionPolicyStateDigest(community));
         return proposal(proposal);
     }
 
@@ -219,7 +239,9 @@ public class OrdinaryGovernanceService {
         // valid forever regardless of what the policy does afterward - staleness only ever blocks a
         // future execute() call, never questions a past one.
         if(!"APPROVED".equals(proposal.get("status"))) return false;
-        String current=policyStateDigest((UUID)proposal.get("definition_id"));
+        String current="RETENTION_POLICY_CHANGE".equals(proposal.get("proposal_type"))
+            ? retentionPolicyStateDigest((UUID)proposal.get("community_id"))
+            : policyStateDigest((UUID)proposal.get("definition_id"));
         return !current.equals(proposal.get("reference_state_digest"));
     }
 
@@ -257,6 +279,10 @@ public class OrdinaryGovernanceService {
         if("PUBLISH_REFERENCE".equals(type)) {
             String decision="Approved by ordinary community governance vote "+proposalId+" (policy v"+proposal.get("governance_policy_version")+")";
             result=reference.publishDirect(user,(UUID)proposal.get("target_reference_proposal_id"),decision);
+        } else if("RETENTION_POLICY_CHANGE".equals(type)) {
+            var payload=ReferenceService.parse((String)proposal.get("payload_json"));
+            var r=new RetentionService.PolicyRequest((int)payload.get("retentionPeriodDays"),(String)payload.get("explanation"));
+            result=retention.setPolicyDirect(user,(UUID)proposal.get("community_id"),r);
         } else {
             var payload=ReferenceService.parse((String)proposal.get("payload_json"));
             var r=new ReferenceController.PolicyRequest((int)payload.get("windowDays"),(int)payload.get("minimumObservations"),

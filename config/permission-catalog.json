@@ -173,6 +173,24 @@
       "fieldKey": null,
       "labelKey": "stir.governanceManage",
       "resourceKey": "stir.governance"
+    },
+    {
+      "actionKey": "manage",
+      "apiPath": "/api/stir/tenants/{tenantId}/references/consent",
+      "code": "stir.consent.manage",
+      "description": "view and withdraw your own consent to reference evidence contribution",
+      "fieldKey": null,
+      "labelKey": "stir.consentManage",
+      "resourceKey": "stir.consent"
+    },
+    {
+      "actionKey": "manage",
+      "apiPath": "/api/stir/tenants/{tenantId}/references/retention",
+      "code": "stir.retention.manage",
+      "description": "manage retention policy and anonymize observations past retention",
+      "fieldKey": null,
+      "labelKey": "stir.retentionManage",
+      "resourceKey": "stir.retention"
     }
   ]
 }

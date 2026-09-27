@@ -55,6 +55,11 @@ public class OrdinaryGovernanceController {
     public Object proposePolicyChange(@PathVariable UUID definitionId,@AuthenticationPrincipal CurrentUser user,@Valid @RequestBody ReferenceController.PolicyRequest r) {
         ReferenceService.requireCommunityAuthority(user); return service.proposePolicyChange(user,definitionId,r);
     }
+    @PostMapping("/proposals/community/{communityId}/retention-policy") @PreAuthorize("@permissionService.hasPermission('stir.governance.vote')")
+    public Object proposeRetentionPolicyChange(@PathVariable UUID communityId,@AuthenticationPrincipal CurrentUser user,@Valid @RequestBody RetentionController.PolicyRequest r) {
+        ReferenceService.requireCommunityAuthority(user);
+        return service.proposeRetentionPolicyChange(user,communityId,new RetentionService.PolicyRequest(r.retentionPeriodDays(),r.explanation()));
+    }
 
     @GetMapping("/proposals/community/{communityId}") @PreAuthorize("@permissionService.hasPermission('stir.references.read')")
     public Object proposals(@PathVariable UUID communityId) { return service.proposals(communityId); }

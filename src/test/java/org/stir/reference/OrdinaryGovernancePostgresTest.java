@@ -39,7 +39,7 @@ class OrdinaryGovernancePostgresTest {
         jdbc.execute("set local role idax_app"); jdbc.queryForObject("select set_config('app.tenant_id',?,true)",String.class,tenant.toString());
         TenantContext.set(new TenantContext(tenant,null,userId,"test",TenantContext.DbRole.IDAX_APP));
         var independence=new ParticipantIndependenceService(jdbc,mock(OstrisClient.class));
-        reference=new ReferenceService(jdbc,independence); governance=new OrdinaryGovernanceService(jdbc,reference);
+        reference=new ReferenceService(jdbc,independence); governance=new OrdinaryGovernanceService(jdbc,reference,new RetentionService(jdbc,reference));
         proposer=mock(CurrentUser.class); when(proposer.getUserId()).thenReturn(userId);
         superadmin=mock(CurrentUser.class); when(superadmin.getUserId()).thenReturn(UUID.randomUUID()); when(superadmin.isSuperuser()).thenReturn(true);
         community=UUID.randomUUID();

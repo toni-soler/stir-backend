@@ -98,7 +98,8 @@ public class ReferenceService {
     /** When ordinary governance is enabled for a community, a direct publisher call must be
      * refused - the value/policy decision belongs to an approved ordinary_proposal instead
      * (ORDINARY_GOVERNANCE.md). */
-    private void requireDirectMutationAllowed(UUID communityId) {
+    /** Package-private: RetentionService's own policy gate reuses this exact check. */
+    void requireDirectMutationAllowed(UUID communityId) {
         var rows=db.queryForList("select ordinary_governance_enabled from stir.community_governance_settings where tenant_id=? and community_id=?",tenant(),communityId);
         if(!rows.isEmpty() && Boolean.TRUE.equals(rows.getFirst().get("ordinary_governance_enabled")))
             throw new ResponseStatusException(CONFLICT,"Ordinary governance is active for this community; act through an approved proposal instead");
@@ -139,6 +140,15 @@ public class ReferenceService {
         var observations=db.query("select * from stir.reference_observation where tenant_id=? and definition_id=? and observed_at < ? order by id",
             (rs,n)->new EvidenceAnalysis.Observation(rs.getObject("id",UUID.class),rs.getString("source"),rs.getObject("participant_a",UUID.class),rs.getObject("participant_b",UUID.class),
                 rs.getBigDecimal("amount"),rs.getBigDecimal("quantity"),rs.getString("quantity_unit"),rs.getString("unit_ref"),rs.getBoolean("aggregate_consent"),rs.getTimestamp("observed_at").toInstant()),tenant(),id,Timestamp.from(cutoff));
+        // A later withdrawal never rewrites aggregate_consent (the frozen fact of what was granted
+        // at acceptance) - it only ever affects snapshots computed after the withdrawal, via this
+        // separate, live-queried exclusion set (same additive pattern as finalExclusions below).
+        // A cutoff already cached in reference_snapshot is never re-evaluated against a later
+        // withdrawal (see the daily-cache check above this query).
+        var withdrawn=new HashSet<>(db.queryForList("select distinct c.observation_id from stir.reference_consent c "+
+            "join lateral (select action from stir.reference_consent_event where tenant_id=c.tenant_id and consent_id=c.id order by sequence desc limit 1) e on true "+
+            "join stir.reference_observation o on o.tenant_id=c.tenant_id and o.id=c.observation_id "+
+            "where c.tenant_id=? and o.definition_id=? and e.action='WITHDRAW'",UUID.class,tenant(),id));
         var constitutional=constitution((UUID)d.get("community_id"));
         var bounds=parse((String)constitutional.get("canonical_json"));
         var policy=new EvidenceAnalysis.Policy((int)p.get("window_days"),(int)p.get("minimum_observations"),(int)p.get("minimum_participants"),
@@ -152,6 +162,11 @@ public class ReferenceService {
             ") e on true where c.tenant_id=? and c.definition_id=?",Timestamp.from(cutoff),tenant(),id);
         for(var item:cases) if("FINAL".equals(item.get("status")))
             finalExclusions.put((UUID)item.get("observation_id"),"FINAL_INTEGRITY_FINDING:"+item.get("signal_code"));
+        // Withdrawal is a distinct, more specific exclusion reason than the generic
+        // NO_BILATERAL_CONSENT (which also covers a party that never granted in the first place) -
+        // but a FINAL integrity finding always takes priority in what's shown, since withdrawing
+        // consent must never look like the reason integrity evidence stopped counting.
+        for(var obsId:withdrawn) finalExclusions.putIfAbsent(obsId,"CONSENT_WITHDRAWN");
         // Independence assurance is a pure read of STIR's own projection - never a live osTRIS call
         // from here (ParticipantIndependenceService.refresh() is the only writer, and only a
         // publisher can trigger it). A row older than this policy's own freshnessDays is treated as
@@ -274,10 +289,20 @@ public class ReferenceService {
         if(rows.isEmpty()) return null;
         return Map.of("canonicalJson",rows.getFirst().get("canonical_json"),"digestSha256",rows.getFirst().get("digest_sha256"));
     }
-    public void record(UUID definition,String source,UUID sourceId,UUID a,UUID b,BigDecimal amount,BigDecimal quantity,String quantityUnit,String unit,boolean consent,Instant at) {
-        if(definition==null) return;
-        db.update("insert into stir.reference_observation values (?,?,?,?,?,?,?,?,?,?,?,?,?) on conflict (tenant_id,source,source_id) do nothing",
-            UUID.randomUUID(),tenant(),definition,source,sourceId,a,b,amount,quantity,quantityUnit,unit,consent,Timestamp.from(at));
+    /** Returns the observation's id whether this call inserted it or it already existed (the
+     * upsert-and-RETURNING idiom) - callers that also need to attach per-party consent records
+     * (ReferenceAcceptanceAdapter) require the real stored id, never a would-be one that a
+     * conflicting insert silently discarded. */
+    public UUID record(UUID definition,String source,UUID sourceId,UUID a,UUID b,BigDecimal amount,BigDecimal quantity,String quantityUnit,String unit,boolean consent,Instant at) {
+        if(definition==null) return null;
+        UUID id=UUID.randomUUID();
+        int inserted=db.update("insert into stir.reference_observation "+
+            "(id,tenant_id,definition_id,source,source_id,participant_a,participant_b,amount,quantity,quantity_unit,unit_ref,aggregate_consent,observed_at) "+
+            "values (?,?,?,?,?,?,?,?,?,?,?,?,?) on conflict (tenant_id,source,source_id) do nothing",
+            id,tenant(),definition,source,sourceId,a,b,amount,quantity,quantityUnit,unit,consent,Timestamp.from(at));
+        // DO NOTHING (never DO UPDATE) - this table only grants SELECT,INSERT plus the narrow
+        // anonymization columns; a lookup on conflict needs no privilege beyond that.
+        return inserted>0?id:db.queryForObject("select id from stir.reference_observation where tenant_id=? and source=? and source_id=?",UUID.class,tenant(),source,sourceId);
     }
     public void freezeContext(UUID definition,UUID agreement,String contractualDigest,boolean consent) {
         if(definition==null) return;
