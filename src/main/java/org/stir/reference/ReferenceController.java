@@ -43,6 +43,8 @@ public class ReferenceController {
     public Object evidenceManifest(@PathVariable UUID id) { return service.evidenceManifest(id); }
     @GetMapping("/{id}/history") @PreAuthorize("@permissionService.hasPermission('stir.references.read')")
     public Object history(@PathVariable UUID id) { return service.history(id); }
+    @GetMapping("/{id}/seed-history") @PreAuthorize("@permissionService.hasPermission('stir.references.read')")
+    public Object seedHistory(@PathVariable UUID id) { return service.seedHistory(id); }
     @GetMapping("/{id}/proposals") @PreAuthorize("@permissionService.hasPermission('stir.references.read')")
     public Object proposals(@PathVariable UUID id) { return service.proposals(id); }
     @PostMapping("/{id}/proposals") @PreAuthorize("@permissionService.hasPermission('stir.references.propose')")
@@ -80,11 +82,24 @@ public class ReferenceController {
         // Ordinary field, not constitutional-authority-protected like the four above: how much of
         // this reference's evidence must carry real independence assurance before it counts as
         // sufficient. Null (the default) means no minimum - fully backward compatible.
-        @Min(0) @Max(100) Integer minimumIndependenceCoveragePercent) {
+        @Min(0) @Max(100) Integer minimumIndependenceCoveragePercent,
+        // Also ordinary, not constitutional: which non-AGREEMENT sources may contribute at all
+        // (MULTI_SOURCE_VALUE_EVIDENCE.md). Widening the input surface never disables provenance/
+        // independence/history invariants, which every added observation still has to pass exactly
+        // like an AGREEMENT does - so this is a policy decision, governable by Ordinary Governance
+        // like any other REFERENCE_POLICY_CHANGE, never a Seven Keys concern.
+        boolean listingSourceEnabled, boolean wantedSourceEnabled) {
         public PolicyRequest(int windowDays,int minimumObservations,int minimumParticipants,
             BigDecimal maximumParticipantShare,int freshnessDays,String explanation) {
             this(windowDays,minimumObservations,minimumParticipants,maximumParticipantShare,freshnessDays,
-                explanation,null,null,null,null,null);
+                explanation,null,null,null,null,null,false,false);
+        }
+        public PolicyRequest(int windowDays,int minimumObservations,int minimumParticipants,BigDecimal maximumParticipantShare,
+            int freshnessDays,String explanation,Boolean independenceChecksRequired,Boolean concentrationChecksRequired,
+            Boolean provenanceRequired,Boolean forceReference,Integer minimumIndependenceCoveragePercent) {
+            this(windowDays,minimumObservations,minimumParticipants,maximumParticipantShare,freshnessDays,explanation,
+                independenceChecksRequired,concentrationChecksRequired,provenanceRequired,forceReference,
+                minimumIndependenceCoveragePercent,false,false);
         }
     }
     public record ProposalRequest(@NotNull @Pattern(regexp="VALUE|BAND|CONVENTION|QUALITATIVE") String kind,

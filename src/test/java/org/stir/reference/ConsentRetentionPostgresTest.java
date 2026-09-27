@@ -60,7 +60,7 @@ class ConsentRetentionPostgresTest {
     UUID observationWithConsent(UUID definitionId,UUID a,UUID b,boolean aGrants,boolean bGrants,Instant at) {
         var d=reference.definition(definitionId);
         UUID obs=reference.record(definitionId,"AGREEMENT",UUID.randomUUID(),a,b,BigDecimal.TEN,BigDecimal.ONE,"loaf",(String)d.get("unit_ref"),aGrants&&bGrants,at);
-        consent.capture(obs,definitionId,a,aGrants); consent.capture(obs,definitionId,b,bGrants);
+        consent.capture(obs,definitionId,a,aGrants,ConsentService.AGREEMENT_PURPOSE); consent.capture(obs,definitionId,b,bGrants,ConsentService.AGREEMENT_PURPOSE);
         return obs;
     }
     UUID consentIdFor(UUID observationId,UUID party) {

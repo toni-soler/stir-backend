@@ -3,6 +3,7 @@ package org.stir.reference;
 import es.idynamicsax.idax.security.CurrentUser;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.*;
+import java.math.BigDecimal;
 import java.util.*;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -60,6 +61,11 @@ public class OrdinaryGovernanceController {
         ReferenceService.requireCommunityAuthority(user);
         return service.proposeRetentionPolicyChange(user,communityId,new RetentionService.PolicyRequest(r.retentionPeriodDays(),r.explanation()));
     }
+    @PostMapping("/proposals/{definitionId}/seed") @PreAuthorize("@permissionService.hasPermission('stir.governance.vote')")
+    public Object proposeCommunitySeed(@PathVariable UUID definitionId,@AuthenticationPrincipal CurrentUser user,@Valid @RequestBody SeedRequest r) {
+        ReferenceService.requireCommunityAuthority(user);
+        return service.proposeCommunitySeed(user,definitionId,new OrdinaryGovernanceService.SeedRequest(r.kind(),r.lowerValue(),r.upperValue(),r.rationale(),r.basis(),r.validDays()));
+    }
 
     @GetMapping("/proposals/community/{communityId}") @PreAuthorize("@permissionService.hasPermission('stir.references.read')")
     public Object proposals(@PathVariable UUID communityId) { return service.proposals(communityId); }
@@ -89,4 +95,7 @@ public class OrdinaryGovernanceController {
     public record VoteRequest(@NotBlank @Pattern(regexp="APPROVE|REJECT|ABSTAIN") String choice) {}
     public record PolicyRequest(@Min(1) int quorumNumerator,@Min(1) int quorumDenominator,@Min(1) int approvalNumerator,@Min(1) int approvalDenominator,
         @Min(1) @Max(2160) int votingWindowHours,@NotBlank String abstentionRule,@NotBlank @Size(max=2000) String explanation) {}
+    public record SeedRequest(@NotNull @Pattern(regexp="VALUE|BAND|QUALITATIVE") String kind,
+        @PositiveOrZero @Digits(integer=16,fraction=2) BigDecimal lowerValue,@PositiveOrZero @Digits(integer=16,fraction=2) BigDecimal upperValue,
+        @NotBlank @Size(max=2000) String rationale,@NotBlank @Size(max=100) String basis,@Min(1) @Max(365) int validDays) {}
 }

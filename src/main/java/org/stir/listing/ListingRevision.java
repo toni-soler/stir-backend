@@ -5,28 +5,26 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.UUID;
 
-@Entity @Table(schema="stir", name="listing")
-public class Listing {
+/** Immutable point-in-time snapshot of a Listing, created on every create/update. A LISTING/WANTED
+ * reference_observation points here, never at Listing.id directly - editing a listing must never
+ * rewrite what an earlier observation saw (MULTI_SOURCE_VALUE_EVIDENCE.md). Never updated after
+ * insert. */
+@Entity @Table(schema="stir", name="listing_revision")
+public class ListingRevision {
     @Id public UUID id;
     @Column(name="tenant_id", nullable=false) public UUID tenantId;
+    @Column(name="listing_id", nullable=false) public UUID listingId;
+    @Column(name="revision_number", nullable=false) public int revisionNumber;
     @Column(name="owner_id", nullable=false) public UUID ownerId;
     @Column(nullable=false, length=10) public String direction;
     @Column(nullable=false, length=160) public String title;
-    @Column(nullable=false, length=8000) public String description;
-    @Column(nullable=false, length=40) public String category;
-    @Column(name="resource_kind", nullable=false, length=40) public String resourceKind;
-    @Column(length=160) public String location;
-    @Column(nullable=false, length=10) public String status;
-    @Column(name="hidden_by_moderator", nullable=false) public boolean hiddenByModerator;
-    @Column(name="reference_definition_id") public UUID referenceDefinitionId;
-    // The owner's own ask/want, never "what the market accepts" - opt-in, mirroring Offer's own
-    // proposedAmount/proposedUnitRef/shareReferenceObservation (MULTI_SOURCE_VALUE_EVIDENCE.md).
     @Column(name="indicative_amount", precision=18, scale=2) public BigDecimal indicativeAmount;
     @Column(name="indicative_quantity", precision=18, scale=4) public BigDecimal indicativeQuantity;
     @Column(name="indicative_unit_label", length=40) public String indicativeUnitLabel;
     @Column(name="indicative_unit_ref", length=60) public String indicativeUnitRef;
+    @Column(name="reference_definition_id") public UUID referenceDefinitionId;
     @Column(name="share_reference_observation", nullable=false) public boolean shareReferenceObservation;
-    @Version public long version;
+    @Column(name="canonical_json", nullable=false, columnDefinition="text") public String canonicalJson;
+    @Column(name="digest_sha256", nullable=false, length=64) public String digestSha256;
     @Column(name="created_at", nullable=false) public Instant createdAt;
-    @Column(name="updated_at", nullable=false) public Instant updatedAt;
 }

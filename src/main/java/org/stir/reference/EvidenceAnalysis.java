@@ -11,22 +11,47 @@ public final class EvidenceAnalysis {
                          BigDecimal maximumParticipantShare, int freshnessDays,
                          int minimumRelationships, BigDecimal maximumPairShare,
                          boolean independenceChecksRequired, boolean concentrationChecksRequired,
-                         Integer minimumIndependenceCoveragePercent) {
+                         Integer minimumIndependenceCoveragePercent,
+                         String eligibleSource, boolean requiresCounterparty) {
         public Policy(int windowDays,int minimumObservations,int minimumParticipants,
                       BigDecimal maximumParticipantShare,int freshnessDays) {
             this(windowDays,minimumObservations,minimumParticipants,maximumParticipantShare,
-                 freshnessDays,3,new BigDecimal("0.50"),true,true,null);
+                 freshnessDays,3,new BigDecimal("0.50"),true,true,null,"AGREEMENT",true);
         }
         public Policy(int windowDays,int minimumObservations,int minimumParticipants,
                       BigDecimal maximumParticipantShare,int freshnessDays,
                       int minimumRelationships,BigDecimal maximumPairShare,
                       boolean independenceChecksRequired,boolean concentrationChecksRequired) {
             this(windowDays,minimumObservations,minimumParticipants,maximumParticipantShare,freshnessDays,
-                 minimumRelationships,maximumPairShare,independenceChecksRequired,concentrationChecksRequired,null);
+                 minimumRelationships,maximumPairShare,independenceChecksRequired,concentrationChecksRequired,null,"AGREEMENT",true);
+        }
+        public Policy(int windowDays,int minimumObservations,int minimumParticipants,
+                      BigDecimal maximumParticipantShare,int freshnessDays,
+                      int minimumRelationships,BigDecimal maximumPairShare,
+                      boolean independenceChecksRequired,boolean concentrationChecksRequired,
+                      Integer minimumIndependenceCoveragePercent) {
+            this(windowDays,minimumObservations,minimumParticipants,maximumParticipantShare,freshnessDays,
+                 minimumRelationships,maximumPairShare,independenceChecksRequired,concentrationChecksRequired,
+                 minimumIndependenceCoveragePercent,"AGREEMENT",true);
+        }
+        /** A single-party source (LISTING/WANTED, MULTI_SOURCE_VALUE_EVIDENCE.md) has no
+         * counterparty at all - never a missing one. requiresCounterparty=false skips every
+         * bilateral-only check (MISSING_COUNTERPARTY, participant-cluster, pair/relationship
+         * counting) instead of misreporting a single-party observation as incomplete. */
+        public static Policy forSource(int windowDays,int minimumObservations,int minimumParticipants,
+                      BigDecimal maximumParticipantShare,int freshnessDays,String eligibleSource,boolean requiresCounterparty) {
+            return new Policy(windowDays,minimumObservations,minimumParticipants,maximumParticipantShare,freshnessDays,
+                 3,new BigDecimal("0.50"),true,true,null,eligibleSource,requiresCounterparty);
         }
     }
     public record Observation(UUID id, String source, UUID a, UUID b, BigDecimal amount,
-                              BigDecimal quantity, String quantityUnit, String unitRef, boolean consent, Instant at) {}
+                              BigDecimal quantity, String quantityUnit, String unitRef, boolean consent, Instant at,
+                              UUID economicLineageId) {
+        public Observation(UUID id,String source,UUID a,UUID b,BigDecimal amount,BigDecimal quantity,
+                           String quantityUnit,String unitRef,boolean consent,Instant at) {
+            this(id,source,a,b,amount,quantity,quantityUnit,unitRef,consent,at,null);
+        }
+    }
     public record Result(Map<String,Object> summary, Map<String,String> exclusions, List<String> included) {}
     /** What STIR's projection of osTRIS's identity continuity currently says about one account
      * (ParticipantIndependenceService.Info, narrowed to what this pure function needs). osTRIS never
@@ -50,39 +75,46 @@ public final class EvidenceAnalysis {
         var excluded=new TreeMap<String,String>(); var included=new ArrayList<String>();
         var values=new ArrayList<BigDecimal>(); var participants=new HashMap<UUID,Integer>();
         var pairs=new HashMap<String,Integer>(); var days=new HashSet<java.time.LocalDate>(); Instant newest=null;
+        boolean bilateral=policy.requiresCounterparty();
         for(var o:observations) {
             String reason=null;
             if(finalExclusions.containsKey(o.id())) reason=finalExclusions.get(o.id());
-            else if(!"AGREEMENT".equals(o.source())) reason="SOURCE_NOT_AGREEMENT";
-            else if(!o.consent()) reason="NO_BILATERAL_CONSENT";
+            else if(!policy.eligibleSource().equals(o.source())) reason="AGREEMENT".equals(policy.eligibleSource())?"SOURCE_NOT_AGREEMENT":"SOURCE_NOT_ELIGIBLE";
+            else if(!o.consent()) reason=bilateral?"NO_BILATERAL_CONSENT":"NO_CONSENT";
             else if(o.at().isBefore(start) || !o.at().isBefore(cutoff)) reason="OUTSIDE_WINDOW";
             else if(o.amount()==null || o.quantity()==null || o.quantity().signum()<=0 ||
                     !Objects.equals(quantityUnit,o.quantityUnit()) || !Objects.equals(unitRef,o.unitRef())) reason="NOT_COMPARABLE";
-            else if(o.a()==null || o.b()==null || o.a().equals(o.b())) reason="MISSING_COUNTERPARTY";
+            // A single-party source (LISTING/WANTED) has no counterparty at all - never "missing"
+            // one; only a bilateral source requires b to be present and distinct from a.
+            else if(o.a()==null || (bilateral && (o.b()==null || o.a().equals(o.b())))) reason="MISSING_COUNTERPARTY";
             // Confirmed same-continuity-cluster counterparties are a self-trade in disguise - the
             // Agreement stays a valid Agreement (never rewritten), but it is not independent market
             // evidence, exactly like MISSING_COUNTERPARTY above for the literal-same-account case.
-            else if(clusterKey(independence,o.a()).equals(clusterKey(independence,o.b())) &&
+            // Meaningless for a single-party source, which has no counterparty to compare against.
+            else if(bilateral && clusterKey(independence,o.a()).equals(clusterKey(independence,o.b())) &&
                     isRelated(independence,o.a())) reason="RELATED_PARTICIPANT_CLUSTER";
             if(reason!=null) { excluded.put(o.id().toString(),reason); continue; }
             included.add(o.id().toString());
             values.add(o.amount().multiply(basis).divide(o.quantity(),8,RoundingMode.HALF_UP));
-            participants.merge(o.a(),1,Integer::sum); participants.merge(o.b(),1,Integer::sum);
-            String pair=o.a().compareTo(o.b())<0?o.a()+":"+o.b():o.b()+":"+o.a();
-            pairs.merge(pair,1,Integer::sum);
+            participants.merge(o.a(),1,Integer::sum);
+            if(bilateral) {
+                participants.merge(o.b(),1,Integer::sum);
+                String pair=o.a().compareTo(o.b())<0?o.a()+":"+o.b():o.b()+":"+o.a();
+                pairs.merge(pair,1,Integer::sum);
+            }
             days.add(o.at().atZone(ZoneOffset.UTC).toLocalDate());
             if(newest==null || newest.isBefore(o.at())) newest=o.at();
         }
         Collections.sort(values); Collections.sort(included);
         int n=values.size();
-        BigDecimal share=n==0?BigDecimal.ZERO:BigDecimal.valueOf(Collections.max(participants.values())).divide(BigDecimal.valueOf(n),4,RoundingMode.UP);
-        BigDecimal pairShare=n==0?BigDecimal.ZERO:BigDecimal.valueOf(Collections.max(pairs.values())).divide(BigDecimal.valueOf(n),4,RoundingMode.UP);
+        BigDecimal share=n==0||participants.isEmpty()?BigDecimal.ZERO:BigDecimal.valueOf(Collections.max(participants.values())).divide(BigDecimal.valueOf(n),4,RoundingMode.UP);
+        BigDecimal pairShare=n==0||pairs.isEmpty()?BigDecimal.ZERO:BigDecimal.valueOf(Collections.max(pairs.values())).divide(BigDecimal.valueOf(n),4,RoundingMode.UP);
         var reasons=new ArrayList<String>();
         if(n<policy.minimumObservations()) reasons.add("SMALL_SAMPLE");
         if(policy.independenceChecksRequired() && participants.size()<policy.minimumParticipants()) reasons.add("LOW_DIVERSITY");
         if(policy.concentrationChecksRequired() && share.compareTo(policy.maximumParticipantShare())>0) reasons.add("CONCENTRATED");
-        if(policy.independenceChecksRequired() && pairs.size()<policy.minimumRelationships()) reasons.add("INSUFFICIENT_INDEPENDENT_RELATIONSHIPS");
-        if(policy.concentrationChecksRequired() && pairShare.compareTo(policy.maximumPairShare())>0) reasons.add("REPEATED_RELATIONSHIP");
+        if(bilateral && policy.independenceChecksRequired() && pairs.size()<policy.minimumRelationships()) reasons.add("INSUFFICIENT_INDEPENDENT_RELATIONSHIPS");
+        if(bilateral && policy.concentrationChecksRequired() && pairShare.compareTo(policy.maximumPairShare())>0) reasons.add("REPEATED_RELATIONSHIP");
         if(newest==null || newest.isBefore(cutoff.minus(Duration.ofDays(policy.freshnessDays())))) reasons.add("STALE");
 
         // Account diversity is not participant independence: among the accounts behind INCLUDED
@@ -134,9 +166,9 @@ public final class EvidenceAnalysis {
         int assuredIndependentRelationships=pairs.size()-unknownRelationships;
         BigDecimal clusterPairShare=n==0||clusterPairs.isEmpty()?BigDecimal.ZERO:
             BigDecimal.valueOf(Collections.max(clusterPairs.values())).divide(BigDecimal.valueOf(n),4,RoundingMode.UP);
-        if(policy.independenceChecksRequired() && haveCoverage && clusterAdjustedRelationships<policy.minimumRelationships())
+        if(bilateral && policy.independenceChecksRequired() && haveCoverage && clusterAdjustedRelationships<policy.minimumRelationships())
             reasons.add("INSUFFICIENT_ASSURED_RELATIONSHIPS");
-        if(policy.concentrationChecksRequired() && haveCoverage && clusterPairShare.compareTo(policy.maximumPairShare())>0)
+        if(bilateral && policy.concentrationChecksRequired() && haveCoverage && clusterPairShare.compareTo(policy.maximumPairShare())>0)
             reasons.add("HIGH_ASSURED_RELATIONSHIP_CONCENTRATION");
 
         // Refresh coverage integrity: a policy MAY require a minimum share of the evidence to have
@@ -146,11 +178,31 @@ public final class EvidenceAnalysis {
         if(policy.minimumIndependenceCoveragePercent()!=null && coverage.intValue()<policy.minimumIndependenceCoveragePercent())
             reasons.add("INSUFFICIENT_INDEPENDENCE_COVERAGE");
 
+        // Economic lineage (MULTI_SOURCE_VALUE_EVIDENCE.md): the minimal correlation-group concept
+        // so one economic process (a listing, any proposal/counterproposal negotiated on it, and
+        // its eventual Agreement) never counts as several independent voices. Observations with no
+        // lineage at all (COMMUNITY_SEED, or legacy rows recorded before this concept existed) each
+        // count as their own distinct unit - never silently merged with one another.
+        var lineageTouches=new HashMap<String,Integer>();
+        for(var o:observations) {
+            if(!included.contains(o.id().toString())) continue;
+            String key=o.economicLineageId()==null?("no-lineage:"+o.id()):o.economicLineageId().toString();
+            lineageTouches.merge(key,1,Integer::sum);
+        }
+        int economicLineageCount=lineageTouches.size();
+        BigDecimal lineageShare=n==0||lineageTouches.isEmpty()?BigDecimal.ZERO:
+            BigDecimal.valueOf(Collections.max(lineageTouches.values())).divide(BigDecimal.valueOf(n),4,RoundingMode.UP);
+        if(policy.concentrationChecksRequired() && lineageShare.compareTo(policy.maximumParticipantShare())>0)
+            reasons.add("LINEAGE_CONCENTRATED");
+
         boolean sufficient=reasons.isEmpty();
         Map<String,Object> out=new LinkedHashMap<>();
         out.put("status",sufficient?"SUFFICIENT_DATA":"INSUFFICIENT_DATA"); out.put("reasons",reasons);
         out.put("windowStart",start.toString()); out.put("windowEnd",cutoff.toString());
-        out.put("method","AGREEMENTS_MEDIAN_IQR_V1"); out.put("source","AGREEMENT");
+        out.put("method",bilateral&&"AGREEMENT".equals(policy.eligibleSource())?"AGREEMENTS_MEDIAN_IQR_V1":"SOURCE_MEDIAN_IQR_V1");
+        out.put("source",policy.eligibleSource());
+        out.put("economicLineageCount",sufficient?economicLineageCount:null);
+        out.put("maximumLineageShare",sufficient?lineageShare.toPlainString():null);
         out.put("identityAssurance",haveCoverage?(unknownIndependenceAccountCount==0?"INDEPENDENCE_ASSURANCE_FULL_COVERAGE":"INDEPENDENCE_ASSURANCE_PARTIAL_COVERAGE"):"ACCOUNTS_ONLY_RELATED_ACCOUNTS_UNKNOWN");
         out.put("independenceChecksRequired",policy.independenceChecksRequired());
         out.put("concentrationChecksRequired",policy.concentrationChecksRequired());
@@ -173,7 +225,7 @@ public final class EvidenceAnalysis {
         out.put("median",sufficient?rounded(median(values)):null);
         out.put("lowerQuartile",sufficient?rounded(values.get((n-1)/4)):null);
         out.put("upperQuartile",sufficient?rounded(values.get(3*(n-1)/4)):null);
-        out.put("filters",List.of("BILATERAL_CONSENT","EXACT_QUANTITY_UNIT","EXACT_ACCOUNT_UNIT","UTC_DAILY_CUTOFF","NO_OUTLIER_TRIMMING"));
+        out.put("filters",List.of(bilateral?"BILATERAL_CONSENT":"UNILATERAL_CONSENT","EXACT_QUANTITY_UNIT","EXACT_ACCOUNT_UNIT","UTC_DAILY_CUTOFF","NO_OUTLIER_TRIMMING"));
         return new Result(Collections.unmodifiableMap(out),excluded,included);
     }
     private static BigDecimal maxLeaveOneOutShift(List<BigDecimal> sorted) {

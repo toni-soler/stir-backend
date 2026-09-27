@@ -164,8 +164,32 @@ public class OrdinaryGovernanceService {
         payloadMap.put("minimumParticipants",r.minimumParticipants()); payloadMap.put("maximumParticipantShare",r.maximumParticipantShare().toPlainString());
         payloadMap.put("freshnessDays",r.freshnessDays()); payloadMap.put("explanation",r.explanation());
         payloadMap.put("minimumIndependenceCoveragePercent",r.minimumIndependenceCoveragePercent());
+        payloadMap.put("listingSourceEnabled",r.listingSourceEnabled()); payloadMap.put("wantedSourceEnabled",r.wantedSourceEnabled());
         String payload=ReferenceService.canonical(payloadMap);
         UUID proposal=freezeProposal(user,community,definitionId,"REFERENCE_POLICY_CHANGE",null,payload,policyStateDigest(definitionId));
+        return proposal(proposal);
+    }
+    /** Community Seed (MULTI_SOURCE_VALUE_EVIDENCE.md): always governed, unconditionally - unlike
+     * PUBLISH_REFERENCE/REFERENCE_POLICY_CHANGE there is no delegated-publisher direct path at all,
+     * so a community that has never enabled ordinary governance for anything else must still
+     * enable it (electorate + policy) before it can adopt a seed. Platform SuperAdmin cannot reach
+     * this any more than any other mutation here - requireCommunityAuthority above, same as always. */
+    public record SeedRequest(String kind,BigDecimal lowerValue,BigDecimal upperValue,String rationale,String basis,int validDays) {}
+    public Map<String,Object> proposeCommunitySeed(CurrentUser user,UUID definitionId,SeedRequest r) {
+        ReferenceService.requireCommunityAuthority(user);
+        UUID actor=ReferenceService.actor(user);
+        var definition=reference.definition(definitionId); UUID community=(UUID)definition.get("community_id");
+        requireElector(community,actor);
+        if(!Set.of("VALUE","BAND","QUALITATIVE").contains(r.kind())) throw new ResponseStatusException(BAD_REQUEST,"Invalid seed kind");
+        boolean qualitative="QUALITATIVE".equals(r.kind());
+        if(qualitative ? r.lowerValue()!=null || r.upperValue()!=null : r.lowerValue()==null || r.upperValue()==null || r.lowerValue().compareTo(r.upperValue())>0)
+            throw new ResponseStatusException(BAD_REQUEST,"Invalid seed range");
+        var payloadMap=new LinkedHashMap<String,Object>();
+        payloadMap.put("kind",r.kind()); payloadMap.put("lowerValue",r.lowerValue()==null?null:r.lowerValue().toPlainString());
+        payloadMap.put("upperValue",r.upperValue()==null?null:r.upperValue().toPlainString());
+        payloadMap.put("rationale",r.rationale()); payloadMap.put("basis",r.basis()); payloadMap.put("validDays",r.validDays());
+        String payload=ReferenceService.canonical(payloadMap);
+        UUID proposal=freezeProposal(user,community,definitionId,"COMMUNITY_SEED_PUBLICATION",null,payload,ReferenceService.digest(payload));
         return proposal(proposal);
     }
     /** Retention policy is community-scoped, so this proposal type carries no definition_id -
@@ -239,7 +263,12 @@ public class OrdinaryGovernanceService {
         // valid forever regardless of what the policy does afterward - staleness only ever blocks a
         // future execute() call, never questions a past one.
         if(!"APPROVED".equals(proposal.get("status"))) return false;
-        String current="RETENTION_POLICY_CHANGE".equals(proposal.get("proposal_type"))
+        String type=(String)proposal.get("proposal_type");
+        // A seed proposal's payload is fully self-contained (kind/value/rationale/basis/validDays)
+        // - nothing mutable it was frozen against can drift before execution, unlike a policy
+        // change or a reference publication whose underlying state could move mid-vote.
+        if("COMMUNITY_SEED_PUBLICATION".equals(type)) return false;
+        String current="RETENTION_POLICY_CHANGE".equals(type)
             ? retentionPolicyStateDigest((UUID)proposal.get("community_id"))
             : policyStateDigest((UUID)proposal.get("definition_id"));
         return !current.equals(proposal.get("reference_state_digest"));
@@ -283,12 +312,20 @@ public class OrdinaryGovernanceService {
             var payload=ReferenceService.parse((String)proposal.get("payload_json"));
             var r=new RetentionService.PolicyRequest((int)payload.get("retentionPeriodDays"),(String)payload.get("explanation"));
             result=retention.setPolicyDirect(user,(UUID)proposal.get("community_id"),r);
+        } else if("COMMUNITY_SEED_PUBLICATION".equals(type)) {
+            var payload=ReferenceService.parse((String)proposal.get("payload_json"));
+            result=reference.insertSeedDirect((UUID)proposal.get("definition_id"),proposalId,ReferenceService.actor(user),
+                (String)payload.get("kind"),
+                payload.get("lowerValue")==null?null:new BigDecimal((String)payload.get("lowerValue")),
+                payload.get("upperValue")==null?null:new BigDecimal((String)payload.get("upperValue")),
+                (String)payload.get("rationale"),(String)payload.get("basis"),(int)payload.get("validDays"));
         } else {
             var payload=ReferenceService.parse((String)proposal.get("payload_json"));
             var r=new ReferenceController.PolicyRequest((int)payload.get("windowDays"),(int)payload.get("minimumObservations"),
                 (int)payload.get("minimumParticipants"),new BigDecimal((String)payload.get("maximumParticipantShare")),
                 (int)payload.get("freshnessDays"),(String)payload.get("explanation"),null,null,null,null,
-                (Integer)payload.get("minimumIndependenceCoveragePercent"));
+                (Integer)payload.get("minimumIndependenceCoveragePercent"),
+                Boolean.TRUE.equals(payload.get("listingSourceEnabled")),Boolean.TRUE.equals(payload.get("wantedSourceEnabled")));
             result=reference.policyDirect(user,(UUID)proposal.get("definition_id"),r);
         }
         String resultDigest=ReferenceService.digest(ReferenceService.canonical(Map.of("result",result.toString())));

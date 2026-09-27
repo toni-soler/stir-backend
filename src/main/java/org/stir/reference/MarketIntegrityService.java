@@ -28,8 +28,14 @@ public class MarketIntegrityService {
         ReferenceService.requireCommunityAuthority(user);
         UUID actor=ReferenceService.actor(user);
         if(input==null || input.observationId()==null || input.signalCode()==null ||
+           // LISTING/WANTED are cheaper to fabricate than AGREEMENT, so they get their own explicit
+           // vocabulary (MULTI_SOURCE_VALUE_EVIDENCE.md) - a human publisher still decides and
+           // names the concern; this never becomes an automated fraud score. SIGNAL != FINDING
+           // still holds: raising one of these is exactly as provisional as any other signal_code.
            !Set.of("REPEATED_RELATIONSHIP","HIGH_COUNTERPARTY_CONCENTRATION","RELATED_PARTICIPANT_CLUSTER",
-               "CIRCULAR_ACTIVITY","OUTLIER_PENDING_REVIEW","OTHER_EXPLAINED_SIGNAL").contains(input.signalCode()) ||
+               "CIRCULAR_ACTIVITY","OUTLIER_PENDING_REVIEW","OTHER_EXPLAINED_SIGNAL",
+               "LISTING_SPAM","REPEATED_RELISTING","COORDINATED_LISTING_OR_WANTED","TEMPORAL_BURST",
+               "LINEAGE_MANIPULATION","SELECTIVE_CONSENT_PATTERN","SEED_ARTIFICIAL_ORIENTATION").contains(input.signalCode()) ||
            input.reason()==null || input.reason().isBlank() || input.reason().length()>2000 || input.evidenceRefs()==null)
             throw new ResponseStatusException(BAD_REQUEST,"Explicit signal and evidence required");
         var observations=db.queryForList("select definition_id from stir.reference_observation where tenant_id=? and id=?",

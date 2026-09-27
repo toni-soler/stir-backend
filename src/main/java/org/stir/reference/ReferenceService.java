@@ -125,7 +125,13 @@ public class ReferenceService {
             throw new ResponseStatusException(CONFLICT,"Operational policy crosses constitutional bounds");
         int version=db.queryForObject("select coalesce(max(version),0)+1 from stir.reference_policy where tenant_id=? and definition_id=?",Integer.class,tenant(),id);
         UUID policy=UUID.randomUUID();
-        db.update("insert into stir.reference_policy values (?,?,?,?,?,?,?,?,?,?,?,?,?)",policy,tenant(),id,version,r.windowDays(),r.minimumObservations(),r.minimumParticipants(),r.maximumParticipantShare(),r.freshnessDays(),r.explanation(),actor(user),Timestamp.from(Instant.now()),r.minimumIndependenceCoveragePercent());
+        db.update("insert into stir.reference_policy "+
+            "(id,tenant_id,definition_id,version,window_days,minimum_observations,minimum_participants,maximum_participant_share,"+
+            "freshness_days,explanation,created_by,created_at,minimum_independence_coverage_percent,listing_source_enabled,wanted_source_enabled) "+
+            "values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            policy,tenant(),id,version,r.windowDays(),r.minimumObservations(),r.minimumParticipants(),r.maximumParticipantShare(),
+            r.freshnessDays(),r.explanation(),actor(user),Timestamp.from(Instant.now()),r.minimumIndependenceCoveragePercent(),
+            r.listingSourceEnabled(),r.wantedSourceEnabled());
         return one("select * from stir.reference_policy where tenant_id=? and id=?",tenant(),policy);
     }
     public Map<String,Object> currentPolicy(UUID id) {
@@ -191,12 +197,48 @@ public class ReferenceService {
         summary.put("maximumAllowedParticipantShare",policy.maximumParticipantShare().toPlainString());
         summary.put("constitutionVersion",constitutional.get("version"));
         summary.put("constitutionDigest",constitutional.get("digest_sha256"));
+        var included=new ArrayList<>(result.included()); var exclusions=new TreeMap<>(result.exclusions());
+        // Raw counts by source, regardless of eligibility - "AGREEMENTS: 18, LISTINGS: 11" never
+        // insinuates that 37 observations are 37 equally-weighted voices (MULTI_SOURCE_VALUE_EVIDENCE.md).
+        var sourceBreakdown=new TreeMap<String,Integer>();
+        for(var o:observations) sourceBreakdown.merge(o.source(),1,Integer::sum);
+        summary.put("sourceBreakdown",sourceBreakdown);
+        // LISTING/WANTED are computed as their own, separate descriptive buckets - never blended
+        // into the AGREEMENT median/IQR above. Each is only computed when its definition policy
+        // explicitly opted in; every existing definition (both false by default) is unaffected.
+        if(Boolean.TRUE.equals(p.get("listing_source_enabled"))) {
+            var listingPolicy=EvidenceAnalysis.Policy.forSource((int)p.get("window_days"),(int)p.get("minimum_observations"),(int)p.get("minimum_participants"),
+                (BigDecimal)p.get("maximum_participant_share"),(int)p.get("freshness_days"),"LISTING",false);
+            var listingResult=EvidenceAnalysis.analyze(observations,listingPolicy,(BigDecimal)d.get("quantity_basis"),(String)d.get("quantity_unit"),(String)d.get("unit_ref"),cutoff,finalExclusions,independenceMap);
+            summary.put("listingEvidence",listingResult.summary());
+            included.addAll(listingResult.included()); exclusions.putAll(listingResult.exclusions());
+        }
+        if(Boolean.TRUE.equals(p.get("wanted_source_enabled"))) {
+            var wantedPolicy=EvidenceAnalysis.Policy.forSource((int)p.get("window_days"),(int)p.get("minimum_observations"),(int)p.get("minimum_participants"),
+                (BigDecimal)p.get("maximum_participant_share"),(int)p.get("freshness_days"),"WANTED",false);
+            var wantedResult=EvidenceAnalysis.analyze(observations,wantedPolicy,(BigDecimal)d.get("quantity_basis"),(String)d.get("quantity_unit"),(String)d.get("unit_ref"),cutoff,finalExclusions,independenceMap);
+            summary.put("wantedEvidence",wantedResult.summary());
+            included.addAll(wantedResult.included()); exclusions.putAll(wantedResult.exclusions());
+        }
+        // Community Seed (MULTI_SOURCE_VALUE_EVIDENCE.md): a governed normative orientation, never
+        // disguised as market evidence - reported separately, with an explicit, honestly-scoped
+        // signal for when real AGREEMENT evidence now exists (no automatic invalidation formula;
+        // see the doc's SPEC GAP). sourceBreakdown above already counts it by its own COMMUNITY_SEED
+        // source key if one was ever recorded as an observation (it never is - a seed is not an
+        // economic observation at all), so this is purely additive context.
+        var seed=currentSeed(id);
+        if(seed!=null) {
+            var seedSummary=new LinkedHashMap<>(seed);
+            seedSummary.put("supersededByRealEvidence","SUFFICIENT_DATA".equals(result.summary().get("status")));
+            summary.put("communitySeed",seedSummary);
+        }
         String json=canonical(summary);
         // Private membership/exclusion evidence is never a community API response. independenceProjections
         // records exactly which projection (status + osTRIS community_sequence) this frozen snapshot used
         // per account, so a later IdentityContinuity decision can never silently rewrite why an old
         // snapshot looked the way it did - reconstruction replays this recorded state, not today's.
-        String evidence=canonical(Map.of("included",result.included(),"exclusions",result.exclusions(),"independenceProjections",independenceProvenance));
+        Collections.sort(included);
+        String evidence=canonical(Map.of("included",included,"exclusions",exclusions,"independenceProjections",independenceProvenance));
         db.update("insert into stir.reference_snapshot values (?,?,?,?,?,?,?,?,?)",snapshotId,tenant(),id,p.get("id"),Timestamp.from(cutoff),json,digest(json),evidence,Timestamp.from(Instant.now()));
         return publicSnapshot(one("select * from stir.reference_snapshot where tenant_id=? and id=?",tenant(),snapshotId));
     }
@@ -270,6 +312,29 @@ public class ReferenceService {
     public List<Map<String,Object>> proposals(UUID id) {
         definition(id); return db.queryForList("select p.* from stir.reference_proposal p where tenant_id=? and definition_id=? order by proposed_at desc limit 100",tenant(),id);
     }
+    /** Full seed history - a later seed is a new row, never a rewrite of an earlier one
+     * (MULTI_SOURCE_VALUE_EVIDENCE.md). */
+    public List<Map<String,Object>> seedHistory(UUID id) {
+        definition(id); return db.queryForList("select * from stir.community_seed where tenant_id=? and definition_id=? order by version desc",tenant(),id);
+    }
+    /** The most recent seed regardless of valid_until - callers (snapshot()'s
+     * supersededByRealEvidence flag, the frontend) decide what "still current" means; this method
+     * never silently hides an expired or superseded one. Null if this definition never had one. */
+    public Map<String,Object> currentSeed(UUID id) {
+        var rows=seedHistory(id); return rows.isEmpty()?null:rows.getFirst();
+    }
+    /** Only ever called from OrdinaryGovernanceService.execute() for an approved
+     * COMMUNITY_SEED_PUBLICATION proposal - there is no direct-publisher path, unlike
+     * publishDirect()/policyDirect(). Platform SuperAdmin cannot reach this: it is unconditionally
+     * behind an ordinary vote, never a delegated-publisher shortcut. */
+    Map<String,Object> insertSeedDirect(UUID definitionId,UUID proposalId,UUID actor,String kind,BigDecimal lowerValue,BigDecimal upperValue,
+                                        String rationale,String basis,int validDays) {
+        int version=db.queryForObject("select coalesce(max(version),0)+1 from stir.community_seed where tenant_id=? and definition_id=?",Integer.class,tenant(),definitionId);
+        UUID id=UUID.randomUUID(); Instant now=Instant.now();
+        db.update("insert into stir.community_seed values (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",id,tenant(),definitionId,proposalId,version,kind,lowerValue,upperValue,
+            rationale,basis,Timestamp.from(now),Timestamp.from(now.plus(Duration.ofDays(validDays))),actor,Timestamp.from(now));
+        return one("select * from stir.community_seed where tenant_id=? and id=?",tenant(),id);
+    }
     public Map<String,Object> current(UUID id) {
         var history=history(id); if(history.isEmpty()) return null;
         var latest=history.getFirst();
@@ -294,12 +359,20 @@ public class ReferenceService {
      * (ReferenceAcceptanceAdapter) require the real stored id, never a would-be one that a
      * conflicting insert silently discarded. */
     public UUID record(UUID definition,String source,UUID sourceId,UUID a,UUID b,BigDecimal amount,BigDecimal quantity,String quantityUnit,String unit,boolean consent,Instant at) {
+        return record(definition,source,sourceId,a,b,amount,quantity,quantityUnit,unit,consent,at,null);
+    }
+    /** economicLineageId is the minimal correlation-group concept (MULTI_SOURCE_VALUE_EVIDENCE.md):
+     * the originating Listing's id for every source that traces back to one - LISTING/WANTED use
+     * their own listing directly, PROPOSAL/AGREEMENT use the negotiation's listingId - so a single
+     * economic process never silently counts as several independent voices. Null for
+     * COMMUNITY_SEED, which is not an economic process at all. */
+    public UUID record(UUID definition,String source,UUID sourceId,UUID a,UUID b,BigDecimal amount,BigDecimal quantity,String quantityUnit,String unit,boolean consent,Instant at,UUID economicLineageId) {
         if(definition==null) return null;
         UUID id=UUID.randomUUID();
         int inserted=db.update("insert into stir.reference_observation "+
-            "(id,tenant_id,definition_id,source,source_id,participant_a,participant_b,amount,quantity,quantity_unit,unit_ref,aggregate_consent,observed_at) "+
-            "values (?,?,?,?,?,?,?,?,?,?,?,?,?) on conflict (tenant_id,source,source_id) do nothing",
-            id,tenant(),definition,source,sourceId,a,b,amount,quantity,quantityUnit,unit,consent,Timestamp.from(at));
+            "(id,tenant_id,definition_id,source,source_id,participant_a,participant_b,amount,quantity,quantity_unit,unit_ref,aggregate_consent,observed_at,economic_lineage_id) "+
+            "values (?,?,?,?,?,?,?,?,?,?,?,?,?,?) on conflict (tenant_id,source,source_id) do nothing",
+            id,tenant(),definition,source,sourceId,a,b,amount,quantity,quantityUnit,unit,consent,Timestamp.from(at),economicLineageId);
         // DO NOTHING (never DO UPDATE) - this table only grants SELECT,INSERT plus the narrow
         // anonymization columns; a lookup on conflict needs no privilege beyond that.
         return inserted>0?id:db.queryForObject("select id from stir.reference_observation where tenant_id=? and source=? and source_id=?",UUID.class,tenant(),source,sourceId);

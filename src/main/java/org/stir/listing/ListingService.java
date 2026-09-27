@@ -14,6 +14,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 import org.stir.attachment.AttachmentRepository;
 import org.stir.participant.ParticipantProfileRepository;
+import org.stir.reference.ListingEvidenceAdapter;
 import static org.springframework.http.HttpStatus.*;
 
 @Service @Transactional
@@ -22,8 +23,12 @@ public class ListingService {
     private final JdbcTemplate jdbc;
     private final ParticipantProfileRepository profiles;
     private final AttachmentRepository attachments;
-    public ListingService(ListingRepository listings, JdbcTemplate jdbc, ParticipantProfileRepository profiles, AttachmentRepository attachments) {
+    private final ListingRevisionService revisions;
+    private final ListingEvidenceAdapter evidence;
+    public ListingService(ListingRepository listings, JdbcTemplate jdbc, ParticipantProfileRepository profiles, AttachmentRepository attachments,
+                          ListingRevisionService revisions, ListingEvidenceAdapter evidence) {
         this.listings=listings; this.jdbc=jdbc; this.profiles=profiles; this.attachments=attachments;
+        this.revisions=revisions; this.evidence=evidence;
     }
 
     private UUID tenant() {
@@ -76,12 +81,20 @@ public class ListingService {
         if(request.version()!=null) throw new ResponseStatusException(BAD_REQUEST,"Version is assigned by server");
         var listing=new Listing(); listing.id=UUID.randomUUID(); listing.tenantId=tenant(); listing.ownerId=owner(user);
         listing.status="ACTIVE"; listing.createdAt=Instant.now(); apply(listing,request);
-        return listings.saveAndFlush(listing);
+        listing=listings.saveAndFlush(listing);
+        evidence.recorded(revisions.freeze(listing));
+        return listing;
     }
     public Listing update(UUID id, CurrentUser user, ListingRequest request) {
         var listing=owned(id,user);
         if(!"ACTIVE".equals(listing.status)) throw new ResponseStatusException(CONFLICT,"Listing is closed");
-        checkVersion(listing,request.version()); apply(listing,request); return listings.saveAndFlush(listing);
+        checkVersion(listing,request.version()); apply(listing,request);
+        listing=listings.saveAndFlush(listing);
+        // Every edit is a new immutable revision - an earlier LISTING/WANTED observation still
+        // points at its own revision, never at the mutable listing row, so editing never rewrites
+        // what an earlier observation saw (MULTI_SOURCE_VALUE_EVIDENCE.md).
+        evidence.recorded(revisions.freeze(listing));
+        return listing;
     }
     public Listing close(UUID id, CurrentUser user, long version) {
         var listing=owned(id,user);
@@ -106,6 +119,12 @@ public class ListingService {
         listing.referenceDefinitionId=request.referenceDefinitionId();
         listing.direction=request.direction(); listing.title=request.title().trim(); listing.description=request.description().trim();
         listing.category=request.category(); listing.resourceKind=request.resourceKind();
-        listing.location=request.location()==null?null:request.location().trim(); listing.updatedAt=Instant.now();
+        listing.location=request.location()==null?null:request.location().trim();
+        // The owner's own ask/want - opt-in, never "what the market accepts" (MULTI_SOURCE_VALUE_EVIDENCE.md).
+        listing.indicativeAmount=request.indicativeAmount(); listing.indicativeQuantity=request.indicativeQuantity();
+        listing.indicativeUnitLabel=request.indicativeUnitLabel()==null?null:request.indicativeUnitLabel().trim();
+        listing.indicativeUnitRef=request.indicativeUnitRef();
+        listing.shareReferenceObservation=request.shareReferenceObservation();
+        listing.updatedAt=Instant.now();
     }
 }

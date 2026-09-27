@@ -23,15 +23,21 @@ public class ConsentService {
     /** Bump only when the consent notice's actual wording/meaning changes materially - this is
      * what a party is recorded as having been shown, not a schema version. */
     public static final int NOTICE_VERSION = 1;
-    static final String PURPOSE = "REFERENCE_EVIDENCE_CONTRIBUTION";
+    /** Agreement's bilateral consent purpose (ReferenceAcceptanceAdapter). */
+    public static final String AGREEMENT_PURPOSE = "REFERENCE_EVIDENCE_CONTRIBUTION";
+    /** A listing/wanted post's unilateral consent purpose (ListingEvidenceAdapter) - never reused
+     * from AGREEMENT_PURPOSE: a listing has exactly one party behind it, and its consent means
+     * something semantically different from a bilateral Agreement's (MULTI_SOURCE_VALUE_EVIDENCE.md). */
+    public static final String LISTING_PURPOSE = "LISTING_EVIDENCE_CONTRIBUTION";
     private final JdbcTemplate db;
     public ConsentService(JdbcTemplate db) { this.db=db; }
 
-    /** Called only from ReferenceAcceptanceAdapter, inside the same transaction as
-     * ReferenceService.record()/freezeContext(). Idempotent: replaying acceptance for the same
-     * observation/party (should never happen in practice - accept() is one-shot per negotiation -
-     * but is not assumed) returns the same consent id and never records a second initial event. */
-    UUID capture(UUID observationId,UUID definitionId,UUID partyUserId,boolean granted) {
+    /** Called only from ReferenceAcceptanceAdapter/ListingEvidenceAdapter, inside the same
+     * transaction as the observation's own record()/freezeContext(). Idempotent: replaying for
+     * the same observation/party/purpose (should never happen in practice - accept()/create() are
+     * one-shot - but is not assumed) returns the same consent id and never records a second
+     * initial event. */
+    UUID capture(UUID observationId,UUID definitionId,UUID partyUserId,boolean granted,String purpose) {
         if(observationId==null) return null;
         UUID tenant=ReferenceService.tenant();
         UUID id=UUID.randomUUID();
@@ -40,10 +46,10 @@ public class ConsentService {
         int inserted=db.update("insert into stir.reference_consent "+
             "(id,tenant_id,observation_id,definition_id,party_user_id,purpose,notice_version,created_at) values (?,?,?,?,?,?,?,?) "+
             "on conflict (tenant_id,observation_id,party_user_id,purpose) do nothing",
-            id,tenant,observationId,definitionId,partyUserId,PURPOSE,NOTICE_VERSION,Timestamp.from(Instant.now()));
+            id,tenant,observationId,definitionId,partyUserId,purpose,NOTICE_VERSION,Timestamp.from(Instant.now()));
         UUID consentId=inserted>0?id:db.queryForObject(
             "select id from stir.reference_consent where tenant_id=? and observation_id=? and party_user_id=? and purpose=?",
-            UUID.class,tenant,observationId,partyUserId,PURPOSE);
+            UUID.class,tenant,observationId,partyUserId,purpose);
         boolean hasEvent=!db.queryForList("select 1 from stir.reference_consent_event where tenant_id=? and consent_id=?",tenant,consentId).isEmpty();
         if(!hasEvent) db.update("insert into stir.reference_consent_event values (?,?,?,?,?,?,?,?)",
             UUID.randomUUID(),tenant,consentId,1,granted?"GRANT":"DECLINE",partyUserId,null,Timestamp.from(Instant.now()));
