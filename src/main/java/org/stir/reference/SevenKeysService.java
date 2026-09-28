@@ -52,7 +52,7 @@ public class SevenKeysService {
                 boolean requireUv = Boolean.TRUE.equals(material.get("user_verification_required"));
                 long minSignCount = consumeReplayProtection ? ((Number) material.get("sign_count")).longValue() : 0;
                 long newSignCount = WebAuthnCrypto.verifyAssertion(coseKeyCbor, resolveAlgorithm(algorithm), envelope,
-                    WebAuthnCrypto.sha256(message), webauthn.rpId, webauthn.allowedOrigins(), requireUv, minSignCount);
+                    WebAuthnCrypto.sha256(message), webauthn.rpId(), webauthn.allowedOrigins(), requireUv, minSignCount);
                 if (consumeReplayProtection) webauthn.recordSignCount(credentialId, newSignCount);
             } else {
                 SevenKeysCrypto.requireSignature(publicKey, envelope.signature(), message);

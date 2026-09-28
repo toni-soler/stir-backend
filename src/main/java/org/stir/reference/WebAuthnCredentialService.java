@@ -31,6 +31,15 @@ public class WebAuthnCredentialService {
 
     public WebAuthnCredentialService(JdbcTemplate db) { this.db = db; }
 
+    // Package-private accessor METHODS, not the bare @Value fields, for every value another class
+    // in this package reads off this bean (SevenKeysService.verify()) - this class is @Transactional,
+    // so Spring hands callers a CGLIB subclass proxy. CGLIB intercepts method calls and delegates
+    // them to the real target correctly, but a raw field read on the proxy reference resolves
+    // against the proxy object's own (never-injected) field slot, not the target's - silently
+    // returning null instead of the @Value-injected value. Found via a real HTTP E2E run: bootstrap
+    // failed with a null expectedRpId even though registration (called only from within this class,
+    // where `this` is always the real target) worked fine.
+    String rpId() { return rpId; }
     Set<String> allowedOrigins() { return Set.of(allowedOriginsCsv.split(",")); }
 
     public record RegistrationOptions(String challenge, String rpId, String rpName, String userHandle, String userName) {}
