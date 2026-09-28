@@ -38,7 +38,7 @@ class SevenKeysPostgresTest {
         jdbc.queryForObject("select set_config('app.tenant_id',?,true)",String.class,tenant.toString());
         TenantContext.set(new TenantContext(tenant,null,UUID.randomUUID(),"test",TenantContext.DbRole.IDAX_APP));
         user=mock(CurrentUser.class); when(user.getUserId()).thenReturn(UUID.randomUUID());
-        service=new SevenKeysService(jdbc);
+        service=new SevenKeysService(jdbc,new WebAuthnCredentialService(jdbc));
         jdbc.update("insert into stir.marketplace_economic_binding values (?,?,?,now())",tenant,community,UUID.randomUUID());
         for(int i=0;i<7;i++) { keys[i]=key();credentials[i]=UUID.randomUUID();controllers[i]=UUID.randomUUID(); }
         guardian=key();
@@ -95,7 +95,7 @@ class SevenKeysPostgresTest {
         assertEquals(false,((Map<?,?>)service.view(community).get("constitution")).get("independenceChecksRequired"));
         assertEquals(true,service.audit(community).get("valid"));
         assertTrue(((Number)service.audit(community).get("eventCount")).intValue()>=10);
-        assertEquals(service.audit(community),new SevenKeysService(jdbc).audit(community));
+        assertEquals(service.audit(community),new SevenKeysService(jdbc,new WebAuthnCredentialService(jdbc)).audit(community));
         assertThrows(Exception.class,()->service.activate(p,noExecution()));
         assertThrows(Exception.class,()->jdbc.update("delete from stir.market_governance_event where tenant_id=?",tenant));
     }

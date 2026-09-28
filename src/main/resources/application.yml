@@ -33,6 +33,13 @@ storage:
   secret-key: ${STORAGE_SECRET_KEY:${storage_secret_key:}}
   bucket: ${STORAGE_BUCKET:stir-attachments}
 stir:
+  webauthn:
+    # RP ID must be a registrable domain suffix of every origin below (WebAuthn spec); "localhost"
+    # is the one exception browsers accept unregistered, hence the local-dev default. A real
+    # deployment must override both to its real public hostname/origin.
+    rp-id: ${STIR_WEBAUTHN_RP_ID:localhost}
+    rp-name: ${STIR_WEBAUTHN_RP_NAME:STIR}
+    allowed-origins: ${STIR_WEBAUTHN_ALLOWED_ORIGINS:http://localhost:8089}
   instance:
     version: 0.5.0-rc1
     site-name: ${STIR_SITE_NAME:STIR}

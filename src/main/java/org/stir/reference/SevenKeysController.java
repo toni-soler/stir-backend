@@ -10,9 +10,26 @@ import org.springframework.web.bind.annotation.*;
 @RestController @RequestMapping("/api/stir/tenants/{tenantId}/references/governance")
 public class SevenKeysController {
     private final SevenKeysService service;
-    public SevenKeysController(SevenKeysService service) { this.service=service; }
+    private final WebAuthnCredentialService webauthn;
+    public SevenKeysController(SevenKeysService service, WebAuthnCredentialService webauthn) { this.service=service; this.webauthn=webauthn; }
     @ModelAttribute public void tenant(@PathVariable UUID tenantId) {
         if(!tenantId.equals(ReferenceService.tenant())) throw new AccessDeniedException("Tenant context mismatch");
+    }
+    // Same permission every other Seven Keys ceremony action requires in this controller - a
+    // WebAuthn credential only ever becomes constitutionally meaningful once its resulting public
+    // key is submitted as part of a bootstrap/proposal payload through the endpoints below, exactly
+    // like a locally-generated Ed25519 key today; registering one is not itself a governance act.
+    @PostMapping("/webauthn/register/begin") @PreAuthorize("@permissionService.hasPermission('stir.references.publish')")
+    public Object beginWebauthnRegistration(@AuthenticationPrincipal CurrentUser user,@RequestBody WebAuthnCredentialService.RegistrationRequest body) {
+        return webauthn.beginRegistration(user,body);
+    }
+    public record FinishWebauthnRegistration(UUID authorityId,String context,UUID credentialId,
+        String attestationObject,String clientDataJson,String webauthnCredentialId,boolean userVerificationRequired) {}
+    @PostMapping("/webauthn/register/finish") @PreAuthorize("@permissionService.hasPermission('stir.references.publish')")
+    public Object finishWebauthnRegistration(@AuthenticationPrincipal CurrentUser user,@RequestBody FinishWebauthnRegistration body) {
+        return webauthn.finishRegistration(user,new WebAuthnCredentialService.RegistrationRequest(body.authorityId(),body.context(),null),
+            new WebAuthnCredentialService.RegistrationResponse(body.credentialId(),body.attestationObject(),body.clientDataJson(),
+                body.webauthnCredentialId(),body.userVerificationRequired()));
     }
     @PostMapping("/bootstrap") @PreAuthorize("@permissionService.hasPermission('stir.references.publish')")
     public Object bootstrap(@AuthenticationPrincipal CurrentUser user,@RequestBody SevenKeysService.Bootstrap body) {

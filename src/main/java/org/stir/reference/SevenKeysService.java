@@ -10,24 +10,101 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 import static org.springframework.http.HttpStatus.*;
 
-/** STIR-local constitutional authority. Signatures authorize exact immutable proposals, never HTTP roles. */
+/** STIR-local constitutional authority. Signatures authorize exact immutable proposals, never HTTP
+ * roles. WEBAUTHN_HARDWARE_CUSTODY.md: a seat/guardian credential may be the original same-device
+ * SOFTWARE_ED25519 credential or a WEBAUTHN/hardware-backed one - CredentialEnvelope generalizes
+ * "how a credential proved it signed this exact payload" without changing the payload itself, and
+ * every credentialType/algorithm/envelope field added here is purely additive: a request that omits
+ * them (every existing frontend/test call site) resolves to SOFTWARE_ED25519/Ed25519, byte-for-byte
+ * the same behavior as before this increment. */
 @Service @Transactional
 public class SevenKeysService {
     private final JdbcTemplate db;
-    public SevenKeysService(JdbcTemplate db) { this.db=db; }
-    private static void verify(String key,String signature,byte[] message) {
-        try { SevenKeysCrypto.requireSignature(key,signature,message); }
-        catch(IllegalArgumentException e) { throw new ResponseStatusException(BAD_REQUEST,"Invalid constitutional signature"); }
+    private final WebAuthnCredentialService webauthn;
+    public SevenKeysService(JdbcTemplate db, WebAuthnCredentialService webauthn) { this.db = db; this.webauthn = webauthn; }
+
+    private static final String LEGACY_TYPE = "SOFTWARE_ED25519", LEGACY_ALGORITHM = "Ed25519";
+    private static String resolveType(String credentialType) { return credentialType == null ? LEGACY_TYPE : credentialType; }
+    private static String resolveAlgorithm(String algorithm) { return algorithm == null ? LEGACY_ALGORITHM : algorithm; }
+
+    /** Verifies `envelope` proves possession of `publicKey` (credentialType/algorithm as stored on
+     * the seat/authority row, or as declared by a not-yet-bound credential during bootstrap/
+     * rotation/appointment) over the exact domain-separated `message`. For a WEBAUTHN credential
+     * this also enforces the advanced sign_count (native WebAuthn clone/replay detection) and, when
+     * `consumeReplayProtection` is true, persists it - the one place in this class with a real side
+     * effect purely as part of verification, mirrored by WebAuthnCredentialService.recordSignCount
+     * running in the same transaction. `consumeReplayProtection` must be true for every FIRST-time
+     * verification of a freshly submitted envelope (bootstrap, sign(), suspend(), and the guardian/
+     * new-key possession signatures activate() itself collects fresh) and false only when
+     * re-verifying an envelope that was already consumed once before and is now merely being
+     * re-checked for validity (activate()'s re-verification of already-stored seat signatures) -
+     * otherwise the counter check would compare the already-bumped stored count against itself and
+     * wrongly reject a legitimate, previously-accepted signature. */
+    private void verify(UUID credentialId, String credentialType, String algorithm, String publicKey,
+                         CredentialEnvelope envelope, byte[] message, boolean consumeReplayProtection) {
+        if (envelope == null) throw new ResponseStatusException(BAD_REQUEST, "Missing signature");
+        if (!resolveType(credentialType).equals(envelope.credentialType()))
+            throw new ResponseStatusException(BAD_REQUEST, "Credential type mismatch");
+        try {
+            if ("WEBAUTHN".equals(envelope.credentialType())) {
+                var material = webauthn.credentialFor(credentialId);
+                byte[] coseKeyCbor = WebAuthnCrypto.decodeBase64url(publicKey, "publicKey");
+                boolean requireUv = Boolean.TRUE.equals(material.get("user_verification_required"));
+                long minSignCount = consumeReplayProtection ? ((Number) material.get("sign_count")).longValue() : 0;
+                long newSignCount = WebAuthnCrypto.verifyAssertion(coseKeyCbor, resolveAlgorithm(algorithm), envelope,
+                    WebAuthnCrypto.sha256(message), webauthn.rpId, webauthn.allowedOrigins(), requireUv, minSignCount);
+                if (consumeReplayProtection) webauthn.recordSignCount(credentialId, newSignCount);
+            } else {
+                SevenKeysCrypto.requireSignature(publicKey, envelope.signature(), message);
+            }
+        } catch (IllegalArgumentException e) { throw new ResponseStatusException(BAD_REQUEST, "Invalid constitutional signature"); }
     }
-    public record SeatInput(int ordinal,UUID controllerId,UUID credentialId,String publicKey,String possessionSignature) {}
-    public record Bootstrap(UUID authorityId,UUID communityId,List<SeatInput> seats,
-                            UUID guardianCredentialId,String guardianPublicKey,String guardianPossessionSignature) {}
+    private void verify(UUID credentialId, String credentialType, String algorithm, String publicKey,
+                         CredentialEnvelope envelope, byte[] message) {
+        verify(credentialId, credentialType, algorithm, publicKey, envelope, message, true);
+    }
+
+    public record SeatInput(int ordinal, UUID controllerId, UUID credentialId, String publicKey, String possessionSignature,
+                             String credentialType, String algorithm, CredentialEnvelope possessionEnvelope) {
+        public SeatInput(int ordinal, UUID controllerId, UUID credentialId, String publicKey, String possessionSignature) {
+            this(ordinal, controllerId, credentialId, publicKey, possessionSignature, null, null, null);
+        }
+        CredentialEnvelope envelope() { return CredentialEnvelope.of(possessionSignature, possessionEnvelope); }
+    }
+    public record Bootstrap(UUID authorityId, UUID communityId, List<SeatInput> seats,
+                             UUID guardianCredentialId, String guardianPublicKey, String guardianPossessionSignature,
+                             String guardianCredentialType, String guardianAlgorithm, CredentialEnvelope guardianPossessionEnvelope) {
+        public Bootstrap(UUID authorityId, UUID communityId, List<SeatInput> seats,
+                          UUID guardianCredentialId, String guardianPublicKey, String guardianPossessionSignature) {
+            this(authorityId, communityId, seats, guardianCredentialId, guardianPublicKey, guardianPossessionSignature, null, null, null);
+        }
+        CredentialEnvelope guardianEnvelope() { return CredentialEnvelope.of(guardianPossessionSignature, guardianPossessionEnvelope); }
+    }
     public record ProposalInput(UUID proposalId,String actionType,Map<String,Object> after,
                                 List<String> affectedFields,String reason,List<String> evidenceRefs) {}
-    public record SignatureInput(int seatOrdinal,UUID credentialId,String signatureBase64url) {}
-    public record ExecutionInput(String guardianSignature,String newKeyPossessionSignature) {}
-    public record SuspensionInput(int seatOrdinal,UUID credentialId,long expectedSequence,
-                                  Instant declaredAt,String reasonCode,List<String> evidenceRefs,String guardianSignature) {}
+    public record SignatureInput(int seatOrdinal, UUID credentialId, String signatureBase64url, CredentialEnvelope credentialEnvelope) {
+        public SignatureInput(int seatOrdinal, UUID credentialId, String signatureBase64url) {
+            this(seatOrdinal, credentialId, signatureBase64url, null);
+        }
+        CredentialEnvelope envelope() { return CredentialEnvelope.of(signatureBase64url, credentialEnvelope); }
+    }
+    public record ExecutionInput(String guardianSignature, String newKeyPossessionSignature,
+                                  CredentialEnvelope guardianEnvelope, CredentialEnvelope newKeyPossessionEnvelope) {
+        public ExecutionInput(String guardianSignature, String newKeyPossessionSignature) {
+            this(guardianSignature, newKeyPossessionSignature, null, null);
+        }
+        CredentialEnvelope resolvedGuardianEnvelope() { return CredentialEnvelope.of(guardianSignature, guardianEnvelope); }
+        CredentialEnvelope resolvedNewKeyEnvelope() { return CredentialEnvelope.of(newKeyPossessionSignature, newKeyPossessionEnvelope); }
+    }
+    public record SuspensionInput(int seatOrdinal, UUID credentialId, long expectedSequence,
+                                  Instant declaredAt, String reasonCode, List<String> evidenceRefs,
+                                  String guardianSignature, CredentialEnvelope guardianEnvelope) {
+        public SuspensionInput(int seatOrdinal, UUID credentialId, long expectedSequence,
+                                Instant declaredAt, String reasonCode, List<String> evidenceRefs, String guardianSignature) {
+            this(seatOrdinal, credentialId, expectedSequence, declaredAt, reasonCode, evidenceRefs, guardianSignature, null);
+        }
+        CredentialEnvelope envelope() { return CredentialEnvelope.of(guardianSignature, guardianEnvelope); }
+    }
 
     static Map<String,Object> initialConstitution() {
         var m=new LinkedHashMap<String,Object>();
@@ -75,7 +152,7 @@ public class SevenKeysService {
             ReferenceService.tenant(),community);
     }
     private List<Map<String,Object>> seats(UUID authority) {
-        return db.queryForList("select ordinal,controller_id,credential_id,public_key,status from stir.constitutional_seat where tenant_id=? and authority_id=? order by ordinal",
+        return db.queryForList("select ordinal,controller_id,credential_id,public_key,status,credential_type,algorithm from stir.constitutional_seat where tenant_id=? and authority_id=? order by ordinal",
             ReferenceService.tenant(),authority);
     }
     private long next(UUID authority) {
@@ -123,16 +200,18 @@ public class SevenKeysService {
         bootstrap.put("guardianPublicKey",input.guardianPublicKey());
         bootstrap.put("constitutionDigest",ReferenceService.digest(constitutionalJson));
         byte[] message=SevenKeysCrypto.message(SevenKeysCrypto.BOOTSTRAP_DOMAIN,bootstrap);
-        for(var s:ordered) verify(s.publicKey(),s.possessionSignature(),message);
-        verify(input.guardianPublicKey(),input.guardianPossessionSignature(),message);
+        for(var s:ordered) verify(s.credentialId(),s.credentialType(),s.algorithm(),s.publicKey(),s.envelope(),message);
+        verify(input.guardianCredentialId(),input.guardianCredentialType(),input.guardianAlgorithm(),input.guardianPublicKey(),input.guardianEnvelope(),message);
         UUID tenant=ReferenceService.tenant(),authority=input.authorityId();
-        db.update("insert into stir.constitutional_authority values (?,?,?,?,?,?,'ACTIVE',2,?)",
-            authority,tenant,input.communityId(),7,input.guardianCredentialId(),input.guardianPublicKey(),Timestamp.from(Instant.now()));
+        db.update("insert into stir.constitutional_authority values (?,?,?,?,?,?,'ACTIVE',2,?,?,?)",
+            authority,tenant,input.communityId(),7,input.guardianCredentialId(),input.guardianPublicKey(),Timestamp.from(Instant.now()),
+            resolveType(input.guardianCredentialType()),resolveAlgorithm(input.guardianAlgorithm()));
         for(var s:ordered) {
-            db.update("insert into stir.constitutional_seat values (?,?,?,?,?,?,'ACTIVE')",
-                tenant,authority,s.ordinal(),s.controllerId(),s.credentialId(),s.publicKey());
-            db.update("insert into stir.constitutional_credential_history values (?,?,?,?,?,?,?,'ACTIVE',1)",
-                UUID.randomUUID(),tenant,authority,s.ordinal(),s.controllerId(),s.credentialId(),s.publicKey());
+            db.update("insert into stir.constitutional_seat values (?,?,?,?,?,?,'ACTIVE',?,?)",
+                tenant,authority,s.ordinal(),s.controllerId(),s.credentialId(),s.publicKey(),resolveType(s.credentialType()),resolveAlgorithm(s.algorithm()));
+            db.update("insert into stir.constitutional_credential_history values (?,?,?,?,?,?,?,'ACTIVE',1,?,?)",
+                UUID.randomUUID(),tenant,authority,s.ordinal(),s.controllerId(),s.credentialId(),s.publicKey(),
+                resolveType(s.credentialType()),resolveAlgorithm(s.algorithm()));
         }
         db.update("insert into stir.market_constitution values (?,?,?,?,?,?,?,?)",UUID.randomUUID(),tenant,
             input.communityId(),authority,1,constitutionalJson,ReferenceService.digest(constitutionalJson),Timestamp.from(Instant.now()));
@@ -141,11 +220,12 @@ public class SevenKeysService {
     }
     public Map<String,Object> view(UUID community) {
         var a=authority(community,false); var c=constitution(community);
-        return Map.of("authorityId",a.get("id"),"communityId",community,"threshold",7,
-            "guardianStatus",a.get("guardian_status"),"guardianCredentialId",a.get("guardian_credential_id"),
-            "nextSequence",a.get("next_sequence"),"constitutionVersion",c.get("version"),
-            "constitutionDigest",c.get("digest_sha256"),"constitution",ReferenceService.parse((String)c.get("canonical_json")),
-            "seats",seats((UUID)a.get("id")));
+        return Map.ofEntries(Map.entry("authorityId",a.get("id")),Map.entry("communityId",community),Map.entry("threshold",7),
+            Map.entry("guardianStatus",a.get("guardian_status")),Map.entry("guardianCredentialId",a.get("guardian_credential_id")),
+            Map.entry("guardianCredentialType",a.get("guardian_credential_type")),
+            Map.entry("nextSequence",a.get("next_sequence")),Map.entry("constitutionVersion",c.get("version")),
+            Map.entry("constitutionDigest",c.get("digest_sha256")),Map.entry("constitution",ReferenceService.parse((String)c.get("canonical_json"))),
+            Map.entry("seats",seats((UUID)a.get("id"))));
     }
     public Map<String,Object> propose(CurrentUser user,UUID community,ProposalInput input) {
         ReferenceService.actor(user);
@@ -167,7 +247,7 @@ public class SevenKeysService {
             if(!input.after().equals(Map.of("guardianCredentialId",a.get("guardian_credential_id").toString(),"status","REMOVED")))
                 throw new ResponseStatusException(BAD_REQUEST,"Removal may only revoke the current guardian");
         } else if("APPOINT_GUARDIAN".equals(action)) {
-            if(!"REMOVED".equals(a.get("guardian_status")) || !input.after().keySet().equals(Set.of("guardianCredentialId","publicKey")))
+            if(!"REMOVED".equals(a.get("guardian_status")) || !requiredKeysWithOptionalCredentialType(input.after().keySet(),Set.of("guardianCredentialId","publicKey")))
                 throw new ResponseStatusException(CONFLICT,"Guardian appointment requires prior removal");
         } else {
             validateRecoveryProposal(authority,action,input.after());
@@ -191,19 +271,32 @@ public class SevenKeysService {
         event(authority,sequence,"PROPOSED",Map.of("proposalId",input.proposalId().toString(),"payloadDigest",ReferenceService.digest(json)));
         return proposal(input.proposalId());
     }
+    /** True if `actual` equals `required` or `required` plus the optional credentialType/algorithm
+     * pair a WEBAUTHN-sourced new/guardian key adds - the same additive-null convention as every
+     * other new field in this increment, applied to a proposal's `after` map keyset check. */
+    private static boolean requiredKeysWithOptionalCredentialType(Set<String> actual,Set<String> required) {
+        if(actual.equals(required)) return true;
+        var extended=new HashSet<>(required); extended.add("credentialType"); extended.add("algorithm");
+        return actual.equals(extended);
+    }
     private void validateRecoveryProposal(UUID authority,String action,Map<String,Object> after) {
-        if(!after.keySet().containsAll(Set.of("affectedSeat","oldCredentialId","newCredentialId","newPublicKey","controllerId")))
+        var base=Set.of("affectedSeat","oldCredentialId","newCredentialId","newPublicKey","controllerId");
+        if(!after.keySet().containsAll(base))
             throw new ResponseStatusException(BAD_REQUEST,"Incomplete recovery payload");
         int ordinal=((Number)after.get("affectedSeat")).intValue(); var s=seat(authority,ordinal);
         if(!s.get("credential_id").toString().equals(after.get("oldCredentialId")))
             throw new ResponseStatusException(CONFLICT,"Old credential mismatch");
         if("ROTATE_CREDENTIAL".equals(action)) {
+            var required=new HashSet<>(base); required.addAll(Set.of("continuityEvidenceRefs","reason"));
             if(!s.get("controller_id").toString().equals(after.get("controllerId")) ||
-               !after.keySet().equals(Set.of("affectedSeat","oldCredentialId","newCredentialId","newPublicKey","controllerId","continuityEvidenceRefs","reason")))
+               !requiredKeysWithOptionalCredentialType(after.keySet(),required))
                 throw new ResponseStatusException(BAD_REQUEST,"Rotation must preserve controller and carry continuity evidence");
-        } else if(!after.keySet().equals(Set.of("affectedSeat","oldCredentialId","newCredentialId","newPublicKey","controllerId","finalResolutionId","finalResolutionDigest","reason")) ||
-                  s.get("controller_id").toString().equals(after.get("controllerId")))
-            throw new ResponseStatusException(BAD_REQUEST,"Replacement needs a different controller and final resolution");
+        } else {
+            var required=new HashSet<>(base); required.addAll(Set.of("finalResolutionId","finalResolutionDigest","reason"));
+            if(!requiredKeysWithOptionalCredentialType(after.keySet(),required) ||
+               s.get("controller_id").toString().equals(after.get("controllerId")))
+                throw new ResponseStatusException(BAD_REQUEST,"Replacement needs a different controller and final resolution");
+        }
         if(!"EMERGENCY_SUSPENDED".equals(s.get("status")))
             throw new ResponseStatusException(CONFLICT,"Seat must first be suspended");
     }
@@ -253,13 +346,15 @@ public class SevenKeysService {
             if(((Number)after.get("affectedSeat")).intValue()==input.seatOrdinal())
                 throw new ResponseStatusException(CONFLICT,"Affected seat cannot sign its own recovery");
         }
-        verify((String)s.get("public_key"),input.signatureBase64url(),
-            SevenKeysCrypto.message(SevenKeysCrypto.DOMAIN,ReferenceService.parse((String)p.get("payload_json"))));
+        verify((UUID)s.get("credential_id"),(String)s.get("credential_type"),(String)s.get("algorithm"),(String)s.get("public_key"),
+            input.envelope(),SevenKeysCrypto.message(SevenKeysCrypto.DOMAIN,ReferenceService.parse((String)p.get("payload_json"))));
         if(!db.queryForList("select id from stir.constitutional_signature where tenant_id=? and proposal_id=? and seat_ordinal=?",
             ReferenceService.tenant(),id,input.seatOrdinal()).isEmpty())
             throw new ResponseStatusException(CONFLICT,"Seat already signed");
-        db.update("insert into stir.constitutional_signature values (?,?,?,?,?,?,?)",UUID.randomUUID(),ReferenceService.tenant(),id,
-            input.seatOrdinal(),input.credentialId(),input.signatureBase64url(),Timestamp.from(Instant.now()));
+        var envelope=input.envelope();
+        db.update("insert into stir.constitutional_signature values (?,?,?,?,?,?,?,?,?)",UUID.randomUUID(),ReferenceService.tenant(),id,
+            input.seatOrdinal(),input.credentialId(),envelope.signature(),Timestamp.from(Instant.now()),
+            envelope.clientDataJson(),envelope.authenticatorData());
         event(authority,next(authority),"SIGNED",Map.of("proposalId",id.toString(),"seat",input.seatOrdinal(),"credentialId",input.credentialId().toString()));
         return proposal(id);
     }
@@ -276,14 +371,16 @@ public class SevenKeysService {
             throw new ResponseStatusException(CONFLICT,"Constitution changed; proposal is stale");
         if(frozen(authority) && !Set.of("REMOVE_GUARDIAN","ROTATE_CREDENTIAL","REPLACE_CONTROLLER").contains(action))
             throw new ResponseStatusException(CONFLICT,"CONSTITUTIONAL_FREEZE");
-        var signatures=db.queryForList("select seat_ordinal,credential_id,signature_base64url from stir.constitutional_signature where tenant_id=? and proposal_id=?",ReferenceService.tenant(),id);
+        var signatures=db.queryForList("select seat_ordinal,credential_id,signature_base64url,client_data_json,authenticator_data from stir.constitutional_signature where tenant_id=? and proposal_id=?",ReferenceService.tenant(),id);
         if(signatures.size()<required(action)) throw new ResponseStatusException(CONFLICT,"Insufficient constitutional signatures");
         byte[] message=SevenKeysCrypto.message(SevenKeysCrypto.DOMAIN,ReferenceService.parse((String)p.get("payload_json")));
         for(var sig:signatures) {
             var s=seat(authority,(int)sig.get("seat_ordinal"));
             if(!"ACTIVE".equals(s.get("status")) || !s.get("credential_id").equals(sig.get("credential_id")))
                 throw new ResponseStatusException(CONFLICT,"A signing credential was revoked or suspended");
-            verify((String)s.get("public_key"),(String)sig.get("signature_base64url"),message);
+            var envelope=new CredentialEnvelope((String)s.get("credential_type"),(String)s.get("algorithm"),
+                (String)sig.get("signature_base64url"),(String)sig.get("client_data_json"),(String)sig.get("authenticator_data"));
+            verify((UUID)s.get("credential_id"),(String)s.get("credential_type"),(String)s.get("algorithm"),(String)s.get("public_key"),envelope,message,false);
         }
         var after=ReferenceService.parse((String)p.get("after_json"));
         if("AMEND_CONSTITUTION".equals(action)) {
@@ -301,37 +398,40 @@ public class SevenKeysService {
             if(!db.queryForList("select id from stir.constitutional_credential_history where tenant_id=? and authority_id=? and (credential_id=? or public_key=?)",
                 ReferenceService.tenant(),authority,UUID.fromString((String)after.get("guardianCredentialId")),after.get("publicKey")).isEmpty())
                 throw new ResponseStatusException(CONFLICT,"Guardian key must not have served a seat");
-            verify((String)after.get("publicKey"),execution.newKeyPossessionSignature(),
-                SevenKeysCrypto.message(SevenKeysCrypto.POSSESSION_DOMAIN,ReferenceService.parse((String)p.get("payload_json"))));
-            db.update("update stir.constitutional_authority set guardian_credential_id=?,guardian_public_key=?,guardian_status='ACTIVE' where tenant_id=? and id=?",
-                UUID.fromString((String)after.get("guardianCredentialId")),after.get("publicKey"),ReferenceService.tenant(),authority);
+            String newType=resolveType((String)after.get("credentialType")),newAlgorithm=resolveAlgorithm((String)after.get("algorithm"));
+            verify(UUID.fromString((String)after.get("guardianCredentialId")),newType,newAlgorithm,(String)after.get("publicKey"),
+                execution.resolvedNewKeyEnvelope(),SevenKeysCrypto.message(SevenKeysCrypto.POSSESSION_DOMAIN,ReferenceService.parse((String)p.get("payload_json"))));
+            db.update("update stir.constitutional_authority set guardian_credential_id=?,guardian_public_key=?,guardian_status='ACTIVE',guardian_credential_type=?,guardian_algorithm=? where tenant_id=? and id=?",
+                UUID.fromString((String)after.get("guardianCredentialId")),after.get("publicKey"),newType,newAlgorithm,ReferenceService.tenant(),authority);
         } else {
             int ordinal=((Number)after.get("affectedSeat")).intValue(); var old=seat(authority,ordinal);
             if(!"EMERGENCY_SUSPENDED".equals(old.get("status")) || signatures.size()!=6 || !"ACTIVE".equals(a.get("guardian_status")))
                 throw new ResponseStatusException(CONFLICT,"Recovery requires Guardian and all other six active seats");
-            verify((String)a.get("guardian_public_key"),execution.guardianSignature(),
-                SevenKeysCrypto.message(SevenKeysCrypto.GUARDIAN_DOMAIN,ReferenceService.parse((String)p.get("payload_json"))));
-            verify((String)after.get("newPublicKey"),execution.newKeyPossessionSignature(),
-                SevenKeysCrypto.message(SevenKeysCrypto.POSSESSION_DOMAIN,ReferenceService.parse((String)p.get("payload_json"))));
+            verify((UUID)a.get("guardian_credential_id"),(String)a.get("guardian_credential_type"),(String)a.get("guardian_algorithm"),(String)a.get("guardian_public_key"),
+                execution.resolvedGuardianEnvelope(),SevenKeysCrypto.message(SevenKeysCrypto.GUARDIAN_DOMAIN,ReferenceService.parse((String)p.get("payload_json"))));
+            String newType=resolveType((String)after.get("credentialType")),newAlgorithm=resolveAlgorithm((String)after.get("algorithm"));
+            UUID newCredential=UUID.fromString((String)after.get("newCredentialId"));
+            verify(newCredential,newType,newAlgorithm,(String)after.get("newPublicKey"),
+                execution.resolvedNewKeyEnvelope(),SevenKeysCrypto.message(SevenKeysCrypto.POSSESSION_DOMAIN,ReferenceService.parse((String)p.get("payload_json"))));
             if("REPLACE_CONTROLLER".equals(action))
                 throw new ResponseStatusException(CONFLICT,"FINAL_RESOLUTION_VERIFICATION_UNAVAILABLE");
-            UUID nextCredential=UUID.fromString((String)after.get("newCredentialId"));
             if(!db.queryForList("select id from stir.constitutional_credential_history where tenant_id=? and authority_id=? and credential_id=?",
-                ReferenceService.tenant(),authority,nextCredential).isEmpty())
+                ReferenceService.tenant(),authority,newCredential).isEmpty())
                 throw new ResponseStatusException(CONFLICT,"Credential was already used");
             if(!db.queryForList("select id from stir.constitutional_credential_history where tenant_id=? and authority_id=? and public_key=?",
                 ReferenceService.tenant(),authority,after.get("newPublicKey")).isEmpty() ||
                 after.get("newPublicKey").equals(a.get("guardian_public_key")))
                 throw new ResponseStatusException(CONFLICT,"Public key already belongs to the authority");
             long sequence=next(authority);
-            db.update("update stir.constitutional_seat set credential_id=?,public_key=?,status='ACTIVE' where tenant_id=? and authority_id=? and ordinal=?",
-                nextCredential,after.get("newPublicKey"),ReferenceService.tenant(),authority,ordinal);
-            db.update("insert into stir.constitutional_credential_history values (?,?,?,?,?,?,?,'REVOKED',?)",UUID.randomUUID(),
-                ReferenceService.tenant(),authority,ordinal,old.get("controller_id"),old.get("credential_id"),old.get("public_key"),sequence);
-            db.update("insert into stir.constitutional_credential_history values (?,?,?,?,?,?,?,'ACTIVE',?)",UUID.randomUUID(),
-                ReferenceService.tenant(),authority,ordinal,old.get("controller_id"),nextCredential,after.get("newPublicKey"),sequence);
+            db.update("update stir.constitutional_seat set credential_id=?,public_key=?,status='ACTIVE',credential_type=?,algorithm=? where tenant_id=? and authority_id=? and ordinal=?",
+                newCredential,after.get("newPublicKey"),newType,newAlgorithm,ReferenceService.tenant(),authority,ordinal);
+            db.update("insert into stir.constitutional_credential_history values (?,?,?,?,?,?,?,'REVOKED',?,?,?)",UUID.randomUUID(),
+                ReferenceService.tenant(),authority,ordinal,old.get("controller_id"),old.get("credential_id"),old.get("public_key"),sequence,
+                old.get("credential_type"),old.get("algorithm"));
+            db.update("insert into stir.constitutional_credential_history values (?,?,?,?,?,?,?,'ACTIVE',?,?,?)",UUID.randomUUID(),
+                ReferenceService.tenant(),authority,ordinal,old.get("controller_id"),newCredential,after.get("newPublicKey"),sequence,newType,newAlgorithm);
             event(authority,sequence,"CREDENTIAL_ROTATED",Map.of("proposalId",id.toString(),"seat",ordinal,
-                "oldCredentialId",old.get("credential_id").toString(),"newCredentialId",nextCredential.toString()));
+                "oldCredentialId",old.get("credential_id").toString(),"newCredentialId",newCredential.toString()));
         }
         event(authority,next(authority),"ACTIVATED",Map.of("proposalId",id.toString(),"actionType",action));
         return proposal(id);
@@ -351,13 +451,14 @@ public class SevenKeysService {
             "credentialId",input.credentialId().toString(),"reasonCode",input.reasonCode(),
             "evidenceRefs",input.evidenceRefs().stream().sorted().toList(),"sequence",input.expectedSequence(),
             "declaredAt",input.declaredAt().toString());
-        verify((String)a.get("guardian_public_key"),input.guardianSignature(),
-            SevenKeysCrypto.message(SevenKeysCrypto.GUARDIAN_DOMAIN,payload));
+        verify((UUID)a.get("guardian_credential_id"),(String)a.get("guardian_credential_type"),(String)a.get("guardian_algorithm"),(String)a.get("guardian_public_key"),
+            input.envelope(),SevenKeysCrypto.message(SevenKeysCrypto.GUARDIAN_DOMAIN,payload));
         long sequence=next(authority);
         db.update("update stir.constitutional_seat set status='EMERGENCY_SUSPENDED' where tenant_id=? and authority_id=? and ordinal=?",
             ReferenceService.tenant(),authority,input.seatOrdinal());
-        db.update("insert into stir.constitutional_credential_history values (?,?,?,?,?,?,?,'EMERGENCY_SUSPENDED',?)",
-            UUID.randomUUID(),ReferenceService.tenant(),authority,input.seatOrdinal(),s.get("controller_id"),s.get("credential_id"),s.get("public_key"),sequence);
+        db.update("insert into stir.constitutional_credential_history values (?,?,?,?,?,?,?,'EMERGENCY_SUSPENDED',?,?,?)",
+            UUID.randomUUID(),ReferenceService.tenant(),authority,input.seatOrdinal(),s.get("controller_id"),s.get("credential_id"),s.get("public_key"),sequence,
+            s.get("credential_type"),s.get("algorithm"));
         event(authority,sequence,"EMERGENCY_SUSPENDED",payload);
         return view(community);
     }
@@ -384,7 +485,7 @@ public class SevenKeysService {
     }
     public List<Map<String,Object>> credentialHistory(UUID community) {
         UUID authority=(UUID)authority(community,false).get("id");
-        return db.queryForList("select seat_ordinal,controller_id,credential_id,public_key,status,event_sequence from stir.constitutional_credential_history where tenant_id=? and authority_id=? order by event_sequence,seat_ordinal",
+        return db.queryForList("select seat_ordinal,controller_id,credential_id,public_key,status,event_sequence,credential_type,algorithm from stir.constitutional_credential_history where tenant_id=? and authority_id=? order by event_sequence,seat_ordinal",
             ReferenceService.tenant(),authority);
     }
 }

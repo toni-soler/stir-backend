@@ -21,6 +21,14 @@
          bytes - reused here for AgreementSnapshot so both implementations are proven RFC 8785,
          not two divergent hand-rolled canonicalizers. -->
     <dependency><groupId>io.github.erdtman</groupId><artifactId>java-json-canonicalization</artifactId><version>1.1</version></dependency>
+    <!-- WEBAUTHN_HARDWARE_CUSTODY.md: WebAuthn's attestationObject/authenticatorData/COSE_Key are
+         CBOR-encoded. Reusing Jackson's own CBOR codec (version managed by the Spring Boot BOM,
+         same family already in every classpath via spring-boot-starter-web) to decode the small,
+         fixed set of CBOR maps/byte-strings those structures use is far narrower than depending on
+         a full third-party WebAuthn relying-party library (attestation trust stores, metadata
+         service, FIDO conformance surface) this increment explicitly does not need - STIR verifies
+         only the signature and the fields it actually checks, nothing else. -->
+    <dependency><groupId>com.fasterxml.jackson.dataformat</groupId><artifactId>jackson-dataformat-cbor</artifactId></dependency>
     <!-- S3-compatible object storage client (attachments/photos) - speaks the S3 API, so the same
          code targets MinIO locally and any real S3-compatible provider in production; never
          couples STIR to one specific cloud vendor. -->
