@@ -161,6 +161,15 @@ public class TradeService {
             trade.protocolDigest = receipt.protocolDigest(); trade.committedAt = receipt.committedAt();
             agreement.economicPhase = "COMMITTED";
         } catch (StirOstrisException ex) {
+            // A timeout/rate limit/upstream failure does not say whether osTRIS committed. Its
+            // commit endpoint is idempotent by transactionId, so keep the local proposal retryable
+            // until a later commit() or sync() obtains osTRIS's authoritative status.
+            if ("CONTROL_POLICY_NOT_SATISFIED".equals(ex.code))
+                throw new ResponseStatusException(CONFLICT,
+                    "osTRIS authorization is incomplete; collect the required signatures before retrying");
+            if (ex.status == 408 || ex.status == 429 || ex.status >= 500)
+                throw new ResponseStatusException(SERVICE_UNAVAILABLE,
+                    ex.code + ": osTRIS commit status is unconfirmed; retry or synchronize this exchange");
             // Committed in its OWN transaction (via a separate @Transactional(REQUIRES_NEW) bean, so
             // Spring's proxy - and RlsTransactionAspect's tenant/RLS setup - actually applies): this
             // method is about to rethrow, and the surrounding @Transactional would otherwise roll

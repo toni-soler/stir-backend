@@ -143,6 +143,36 @@ class TradeServiceTest {
         // here) so the write survives this method's own transaction rolling back on the way out.
         verify(rejectionRecorder).reject(tenant, agreement.id);
     }
+    @Test void transientOstrisFailurePreservesRetryAndDoesNotRecordRejection() {
+        var trade = tradeAwaitingSignatures();
+        agreement.economicPhase = "AWAITING_SIGNATURES";
+        var receipt = new OstrisClient.CommitReceipt(trade.transactionId, 7L, "protocol-digest", Instant.now());
+        when(ostris.commit(trade.transactionId))
+            .thenThrow(new StirOstrisException(503, "UPSTREAM_UNAVAILABLE", "Temporary outage"))
+            .thenReturn(receipt);
+
+        var error = assertThrows(ResponseStatusException.class, () -> service.commit(payerUser, agreement.id));
+        assertEquals(503, error.getStatusCode().value());
+        assertEquals("AWAITING_SIGNATURES", trade.executionState);
+        assertEquals("AWAITING_SIGNATURES", agreement.economicPhase);
+        verify(rejectionRecorder, never()).reject(any(), any());
+
+        assertEquals("COMMITTED", service.commit(payerUser, agreement.id).executionState());
+        verify(ostris, times(2)).commit(trade.transactionId);
+        verify(rejectionRecorder, never()).reject(any(), any());
+    }
+    @Test void commitBeforeBothSignaturesDoesNotRejectAgreement() {
+        var trade = tradeAwaitingSignatures();
+        agreement.economicPhase = "AWAITING_SIGNATURES";
+        when(ostris.commit(trade.transactionId)).thenThrow(new StirOstrisException(422,
+            "CONTROL_POLICY_NOT_SATISFIED", "Insufficient distinct authorized signers"));
+
+        var error = assertThrows(ResponseStatusException.class, () -> service.commit(payerUser, agreement.id));
+        assertEquals(409, error.getStatusCode().value());
+        assertEquals("AWAITING_SIGNATURES", trade.executionState);
+        assertEquals("AWAITING_SIGNATURES", agreement.economicPhase);
+        verify(rejectionRecorder, never()).reject(any(), any());
+    }
     @Test void commitIsIdempotentOnceAlreadyCommitted() {
         var trade = tradeAwaitingSignatures(); trade.executionState = "COMMITTED"; trade.committedSequence = 3L;
         service.commit(payerUser, agreement.id);
