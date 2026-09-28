@@ -8,6 +8,7 @@ import java.time.Instant;
 import java.util.*;
 import org.junit.jupiter.api.*;
 import org.springframework.web.server.ResponseStatusException;
+import org.springframework.web.client.ResourceAccessException;
 import org.stir.negotiation.*;
 import org.stir.notification.NotificationService;
 import org.stir.participant.ParticipantProfileRepository;
@@ -24,7 +25,7 @@ class TradeServiceTest {
 
     TradeRepository trades; AgreementRepository agreements; OfferRepository offers; AgreementSnapshotRepository snapshots;
     ParticipantEconomicBindingRepository participantBindings; MarketplaceEconomicBindingRepository marketplaceBindings;
-    OstrisClient ostris; TradeService service; EconomicActivationService activation; TradeRejectionRecorder rejectionRecorder;
+    OstrisClient ostris; TradeService service; EconomicActivationService activation;
     Agreement agreement; Offer offer; AgreementSnapshot snapshot;
     CurrentUser payerUser, payeeUser, strangerUser;
 
@@ -35,8 +36,7 @@ class TradeServiceTest {
         marketplaceBindings = mock(MarketplaceEconomicBindingRepository.class);
         ostris = mock(OstrisClient.class);
         activation = new EconomicActivationService(marketplaceBindings, participantBindings, mock(ParticipantProfileRepository.class), ostris);
-        rejectionRecorder = mock(TradeRejectionRecorder.class);
-        service = new TradeService(trades, agreements, offers, snapshots, participantBindings, activation, ostris, rejectionRecorder, mock(NotificationService.class));
+        service = new TradeService(trades, agreements, offers, snapshots, participantBindings, activation, ostris, mock(NotificationService.class));
 
         payerUser = mock(CurrentUser.class); when(payerUser.getUserId()).thenReturn(payer);
         payeeUser = mock(CurrentUser.class); when(payeeUser.getUserId()).thenReturn(payee);
@@ -134,14 +134,13 @@ class TradeServiceTest {
         assertEquals(7L, view.committedSequence());
         assertEquals("COMMITTED", agreement.economicPhase);
     }
-    @Test void commitFailureRecordsTheRejectionInItsOwnTransactionAndSurfacesTheOstrisReason() {
+    @Test void deterministicCreditFailureDoesNotInventTerminalRejection() {
         var trade = tradeAwaitingSignatures();
         when(ostris.commit(trade.transactionId)).thenThrow(new StirOstrisException(422, "CREDIT_FLOOR_EXCEEDED", "Credit floor exceeded"));
         var error = assertThrows(ResponseStatusException.class, () -> service.commit(payerUser, agreement.id));
         assertTrue(error.getReason().contains("CREDIT_FLOOR_EXCEEDED"));
-        // Recorded via a separate @Transactional(REQUIRES_NEW) bean (not a direct field mutation
-        // here) so the write survives this method's own transaction rolling back on the way out.
-        verify(rejectionRecorder).reject(tenant, agreement.id);
+        assertEquals("AWAITING_SIGNATURES", trade.executionState);
+        verify(trades, never()).saveAndFlush(trade);
     }
     @Test void transientOstrisFailurePreservesRetryAndDoesNotRecordRejection() {
         var trade = tradeAwaitingSignatures();
@@ -155,11 +154,9 @@ class TradeServiceTest {
         assertEquals(503, error.getStatusCode().value());
         assertEquals("AWAITING_SIGNATURES", trade.executionState);
         assertEquals("AWAITING_SIGNATURES", agreement.economicPhase);
-        verify(rejectionRecorder, never()).reject(any(), any());
 
         assertEquals("COMMITTED", service.commit(payerUser, agreement.id).executionState());
         verify(ostris, times(2)).commit(trade.transactionId);
-        verify(rejectionRecorder, never()).reject(any(), any());
     }
     @Test void commitBeforeBothSignaturesDoesNotRejectAgreement() {
         var trade = tradeAwaitingSignatures();
@@ -171,7 +168,59 @@ class TradeServiceTest {
         assertEquals(409, error.getStatusCode().value());
         assertEquals("AWAITING_SIGNATURES", trade.executionState);
         assertEquals("AWAITING_SIGNATURES", agreement.economicPhase);
-        verify(rejectionRecorder, never()).reject(any(), any());
+    }
+    @Test void timeoutWithUnknownOutcomeCanReconcileThenDuplicateRetryDoesNotCommitAgain() {
+        var trade = tradeAwaitingSignatures();
+        agreement.economicPhase = "AWAITING_SIGNATURES";
+        when(ostris.commit(trade.transactionId)).thenThrow(new ResourceAccessException("read timed out"));
+        var error = assertThrows(ResponseStatusException.class, () -> service.commit(payerUser, agreement.id));
+        assertEquals(503, error.getStatusCode().value());
+        assertEquals("AWAITING_SIGNATURES", trade.executionState);
+        var committedAt = Instant.now();
+        when(ostris.transaction(trade.transactionId)).thenReturn(new OstrisClient.TransactionStatus(
+            trade.transactionId, community, unit, "EXCHANGE", "OSTRIS-CORE-JCS-1", "0.1", "{}", "digest",
+            "COMMITTED", 8L, "protocol-digest", committedAt, List.of(payerAccount, payeeAccount)));
+        assertEquals("COMMITTED", service.sync(payerUser, agreement.id).executionState());
+        assertEquals("COMMITTED", service.commit(payerUser, agreement.id).executionState());
+        verify(ostris, times(1)).commit(trade.transactionId);
+    }
+    @Test void deterministicRejectionCanBeRetriedAfterConditionsChange() {
+        var trade = tradeAwaitingSignatures();
+        agreement.economicPhase = "AWAITING_SIGNATURES";
+        var receipt = new OstrisClient.CommitReceipt(trade.transactionId, 9L, "protocol-digest", Instant.now());
+        when(ostris.commit(trade.transactionId))
+            .thenThrow(new StirOstrisException(422, "CREDIT_FLOOR_EXCEEDED", "Credit floor exceeded"))
+            .thenReturn(receipt);
+        assertEquals(422, assertThrows(ResponseStatusException.class, () -> service.commit(payerUser, agreement.id)).getStatusCode().value());
+        assertEquals("AWAITING_SIGNATURES", trade.executionState);
+        assertEquals("COMMITTED", service.commit(payerUser, agreement.id).executionState());
+        verify(ostris, times(2)).commit(trade.transactionId);
+    }
+    @Test void legacyFalseRejectionIsReconciledFromOstrisBeforeRetry() {
+        var trade = tradeAwaitingSignatures(); trade.executionState = "REJECTED";
+        agreement.economicPhase = "REJECTED";
+        when(ostris.transaction(trade.transactionId)).thenReturn(new OstrisClient.TransactionStatus(
+            trade.transactionId, community, unit, "EXCHANGE", "OSTRIS-CORE-JCS-1", "0.1", "{}", "digest",
+            "PROPOSED", null, null, null, List.of(payerAccount, payeeAccount)));
+        when(ostris.commit(trade.transactionId)).thenReturn(new OstrisClient.CommitReceipt(trade.transactionId, 10L, "protocol-digest", Instant.now()));
+        assertEquals("COMMITTED", service.commit(payerUser, agreement.id).executionState());
+        verify(ostris, times(1)).transaction(trade.transactionId);
+        verify(ostris, times(1)).commit(trade.transactionId);
+    }
+    @Test void upstreamStatusMatrixNeverBecomesEconomicRejection() {
+        var trade = tradeAwaitingSignatures();
+        agreement.economicPhase = "AWAITING_SIGNATURES";
+        Map<Integer,Integer> expected = Map.of(400,502,401,401,403,403,404,502,408,503,
+            409,409,422,422,429,503,503,503);
+        for (var entry : expected.entrySet()) {
+            doThrow(new StirOstrisException(entry.getKey(), "AUDIT_UPSTREAM_" + entry.getKey(), "Controlled error"))
+                .when(ostris).commit(trade.transactionId);
+            var error = assertThrows(ResponseStatusException.class, () -> service.commit(payerUser, agreement.id));
+            assertEquals(entry.getValue(), error.getStatusCode().value(), "upstream status " + entry.getKey());
+            assertEquals("AWAITING_SIGNATURES", trade.executionState);
+            assertEquals("AWAITING_SIGNATURES", agreement.economicPhase);
+        }
+        verify(trades, never()).saveAndFlush(trade);
     }
     @Test void commitIsIdempotentOnceAlreadyCommitted() {
         var trade = tradeAwaitingSignatures(); trade.executionState = "COMMITTED"; trade.committedSequence = 3L;

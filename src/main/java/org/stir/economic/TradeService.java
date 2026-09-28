@@ -38,17 +38,16 @@ public class TradeService {
     private final ParticipantEconomicBindingRepository participantBindings;
     private final EconomicActivationService activation;
     private final OstrisClient ostris;
-    private final TradeRejectionRecorder rejectionRecorder;
     private final NotificationService notifications;
     private final SecureRandom random = new SecureRandom();
 
     public TradeService(TradeRepository trades, AgreementRepository agreements, OfferRepository offers,
             AgreementSnapshotRepository snapshots, ParticipantEconomicBindingRepository participantBindings,
-            EconomicActivationService activation, OstrisClient ostris, TradeRejectionRecorder rejectionRecorder,
+            EconomicActivationService activation, OstrisClient ostris,
             NotificationService notifications) {
         this.trades = trades; this.agreements = agreements; this.offers = offers; this.snapshots = snapshots;
         this.participantBindings = participantBindings; this.activation = activation; this.ostris = ostris;
-        this.rejectionRecorder = rejectionRecorder; this.notifications = notifications;
+        this.notifications = notifications;
     }
 
     private UUID tenant() {
@@ -154,7 +153,14 @@ public class TradeService {
         var agreement = partyAgreement(tenant, agreementId, actor(user));
         var trade = requireTrade(tenant, agreementId);
         if ("COMMITTED".equals(trade.executionState)) return TradeView.of(trade);
-        if ("REJECTED".equals(trade.executionState)) throw new ResponseStatusException(CONFLICT, "This exchange was already rejected");
+        // Older STIR versions could mark a still-PROPOSED osTRIS transaction REJECTED after a
+        // failed HTTP call. Reconcile that legacy local state before deciding whether to retry.
+        if ("REJECTED".equals(trade.executionState)) {
+            sync(user, agreementId);
+            if ("COMMITTED".equals(trade.executionState)) return TradeView.of(trade);
+            if ("REJECTED".equals(trade.executionState))
+                throw new ResponseStatusException(CONFLICT, "osTRIS status does not permit retry");
+        }
         try {
             var receipt = ostris.commit(trade.transactionId);
             trade.executionState = "COMMITTED"; trade.committedSequence = receipt.communitySequence();
@@ -170,12 +176,18 @@ public class TradeService {
             if (ex.status == 408 || ex.status == 429 || ex.status >= 500)
                 throw new ResponseStatusException(SERVICE_UNAVAILABLE,
                     ex.code + ": osTRIS commit status is unconfirmed; retry or synchronize this exchange");
-            // Committed in its OWN transaction (via a separate @Transactional(REQUIRES_NEW) bean, so
-            // Spring's proxy - and RlsTransactionAspect's tenant/RLS setup - actually applies): this
-            // method is about to rethrow, and the surrounding @Transactional would otherwise roll
-            // back this very write on the way out.
-            rejectionRecorder.reject(tenant, agreementId);
-            throw new ResponseStatusException(UNPROCESSABLE_ENTITY, ex.code + ": " + ex.getMessage());
+            // osTRIS leaves a failed proposal PROPOSED. Even a deterministic 422 is a failed
+            // attempt, not an authoritative terminal transaction state: policy/credit can change.
+            if (ex.status == 401) throw new ResponseStatusException(UNAUTHORIZED, ex.code + ": " + ex.getMessage());
+            if (ex.status == 403) throw new ResponseStatusException(FORBIDDEN, ex.code + ": " + ex.getMessage());
+            if (ex.status == 409) throw new ResponseStatusException(CONFLICT, ex.code + ": " + ex.getMessage());
+            if (ex.status == 422) throw new ResponseStatusException(UNPROCESSABLE_ENTITY, ex.code + ": " + ex.getMessage());
+            // 400/404 on an existing local transaction are a contract/consistency anomaly, not
+            // a verdict on the Agreement. Preserve the proposal for investigation/reconciliation.
+            throw new ResponseStatusException(BAD_GATEWAY, ex.code + ": osTRIS commit contract/transaction could not be confirmed");
+        } catch (org.springframework.web.client.ResourceAccessException ex) {
+            throw new ResponseStatusException(SERVICE_UNAVAILABLE,
+                "osTRIS commit outcome is unknown; retry or synchronize this exchange", ex);
         }
         trade.updatedAt = Instant.now(); trades.saveAndFlush(trade); agreements.saveAndFlush(agreement);
         notifications.create(tenant, agreement.payerUserId, "TRADE_COMMITTED", "AGREEMENT", agreementId);
@@ -195,6 +207,10 @@ public class TradeService {
                 trade.protocolDigest = status.protocolDigest(); trade.committedAt = status.committedAt();
                 trade.updatedAt = Instant.now(); trades.saveAndFlush(trade);
                 agreement.economicPhase = "COMMITTED"; agreements.saveAndFlush(agreement);
+            } else if ("PROPOSED".equals(status.status()) && "REJECTED".equals(trade.executionState)) {
+                // Repair only the legacy false terminal state, based on osTRIS's own status.
+                trade.executionState = "AWAITING_SIGNATURES"; trade.updatedAt = Instant.now(); trades.saveAndFlush(trade);
+                agreement.economicPhase = "AWAITING_SIGNATURES"; agreements.saveAndFlush(agreement);
             }
         }
         return TradeView.of(trade);

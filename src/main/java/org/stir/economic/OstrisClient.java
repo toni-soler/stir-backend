@@ -21,7 +21,11 @@ public class OstrisClient {
     private final RestClient client;
 
     public OstrisClient(org.springframework.core.env.Environment env) {
-        this.client = RestClient.builder().baseUrl(env.getProperty("ostris.base-url", "http://ostris:8095")).build();
+        var requests = new org.springframework.http.client.SimpleClientHttpRequestFactory();
+        requests.setConnectTimeout(java.time.Duration.ofSeconds(5));
+        requests.setReadTimeout(java.time.Duration.ofSeconds(20));
+        this.client = RestClient.builder().requestFactory(requests)
+            .baseUrl(env.getProperty("ostris.base-url", "http://ostris:8095")).build();
     }
 
     private String currentAuthorizationHeader() {
