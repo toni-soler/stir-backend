@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Deliberately NOT a module of stir-backend's own reactor and NOT depending on stir-backend's
+     jar: this is a separate deployable, built with its own `mvn package`, with no Spring Boot,
+     no STIR controllers, and no dependency that could let it start the STIR application or use
+     idax_app's credential. GOVERNED_STATE_AUDIT_ARCHITECTURE.md: "Proceso Java/container aparte...
+     sin importar controladores STIR ni usar idax_app." -->
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.stir.audit</groupId><artifactId>stir-audit-verifier</artifactId><version>0.1.0-phase1</version>
+  <packaging>jar</packaging>
+  <properties>
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+  <dependencies>
+    <!-- JDBC only - no Spring, no web framework, no STIR code. -->
+    <dependency><groupId>org.postgresql</groupId><artifactId>postgresql</artifactId><version>42.7.4</version></dependency>
+    <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><version>5.11.3</version><scope>test</scope></dependency>
+    <!-- Test-only: applies stir-backend's own V1-V18 migrations from ../src/main/resources so this
+         module's tests exercise the real, single copy of the migration SQL - never a duplicated
+         one - without audit-verifier's main/runtime code depending on Flyway at all. -->
+    <dependency><groupId>org.flywaydb</groupId><artifactId>flyway-core</artifactId><version>11.12.0</version><scope>test</scope></dependency>
+    <dependency><groupId>org.flywaydb</groupId><artifactId>flyway-database-postgresql</artifactId><version>11.12.0</version><scope>test</scope></dependency>
+    <dependency><groupId>org.testcontainers</groupId><artifactId>postgresql</artifactId><version>1.20.6</version><scope>test</scope></dependency>
+    <dependency><groupId>org.testcontainers</groupId><artifactId>junit-jupiter</artifactId><version>1.20.6</version><scope>test</scope></dependency>
+  </dependencies>
+  <build>
+    <finalName>stir-audit-verifier</finalName>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId><artifactId>maven-compiler-plugin</artifactId><version>3.13.0</version>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId><artifactId>maven-surefire-plugin</artifactId><version>3.5.2</version>
+      </plugin>
+      <!-- Shade into one runnable jar with no Spring Boot repackaging machinery - the "least
+           invasive build mechanism" CLAUDE_GOVERNED_STATE_AUDIT_ORDERS.md #4 asks for. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId><artifactId>maven-shade-plugin</artifactId><version>3.6.0</version>
+        <executions>
+          <execution>
+            <phase>package</phase><goals><goal>shade</goal></goals>
+            <configuration>
+              <transformers>
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                  <mainClass>org.stir.audit.verifier.Main</mainClass>
+                </transformer>
+              </transformers>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

@@ -6,3 +6,4 @@ target/
 __pycache__/
 vendor/
 *.log
+dependency-reduced-pom.xml

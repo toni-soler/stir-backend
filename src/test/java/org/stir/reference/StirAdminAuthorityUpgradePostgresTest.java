@@ -43,6 +43,9 @@ class StirAdminAuthorityUpgradePostgresTest {
         assertEquals(1, db.queryForObject("select count(*) from stir.market_constitution where id=?", Integer.class, id));
         assertFalse(db.queryForObject("select has_table_privilege('idax_admin','stir.market_constitution','INSERT')", Boolean.class));
         assertFalse(db.queryForObject("select has_table_privilege('idax_admin','stir.market_integrity_case_event','INSERT')", Boolean.class));
-        assertEquals("17", db.queryForObject("select version from stir.flyway_schema_history where success order by installed_rank desc limit 1", String.class));
+        // >= 18, not a literal "17": this test's job is V16 data surviving the upgrade to
+        // whatever the newest migration is, not pinning an exact number every later additive
+        // migration would otherwise have to remember to bump here too.
+        assertTrue(db.queryForObject("select version::int from stir.flyway_schema_history where success order by installed_rank desc limit 1", Integer.class) >= 18);
     }
 }
