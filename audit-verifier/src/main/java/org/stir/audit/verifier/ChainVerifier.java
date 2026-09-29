@@ -69,13 +69,26 @@ public final class ChainVerifier {
     /** Walks from `fromSequenceInclusive` through the CURRENT live stream_head (not just however
      * many event rows exist), and additionally confirms the last walked event's current_hash still
      * equals the live stream_head.head_hash - catching a head tampered independently of any single
-     * event row, or an event silently inserted/re-pointed without going through the trigger. */
+     * event row, or an event silently inserted/re-pointed without going through the trigger.
+     *
+     * P1-R2 race fix: the head read and the events read now share ONE
+     * `REPEATABLE READ, READ ONLY` snapshot (`AuditSql.beginRepeatableReadSnapshot`) instead of two
+     * separate autocommit calls - PostgreSQL's MVCC snapshot, fixed at the transaction's first
+     * statement, guarantees both reflect the exact same instant. A writer that commits a new
+     * event AFTER this snapshot is taken is simply invisible to this pass entirely (correctly
+     * deferred to the next reconciliation cycle), never partially visible to one read and not the
+     * other - no application-level lock of any kind. */
     ReconciliationOutcome reconcileStreamFrom(UUID tenant, String domain, long fromSequenceInclusive) throws java.sql.SQLException {
-        var liveHead = sql.currentStreamHead(tenant, domain);
-        long liveSequence = liveHead.getKey();
-        byte[] liveHash = liveHead.getValue();
-
-        List<MutationEvent> events = sql.fetchStreamFrom(tenant, domain, Math.max(1, fromSequenceInclusive - 1));
+        long liveSequence; byte[] liveHash; List<MutationEvent> events;
+        sql.beginRepeatableReadSnapshot();
+        try {
+            var liveHead = sql.currentStreamHead(tenant, domain);
+            liveSequence = liveHead.getKey();
+            liveHash = liveHead.getValue();
+            events = sql.fetchStreamFrom(tenant, domain, Math.max(1, fromSequenceInclusive - 1));
+        } finally {
+            sql.endRepeatableReadSnapshot();
+        }
         MutationEvent previous = events.isEmpty() ? null : (fromSequenceInclusive <= 1 ? null : events.get(0));
         int startIdx = (fromSequenceInclusive <= 1) ? 0 : 1;
         long verifiedThrough = fromSequenceInclusive - 1;

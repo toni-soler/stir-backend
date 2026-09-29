@@ -224,8 +224,10 @@ public final class AuditSql implements AutoCloseable {
         return out;
     }
 
-    /** P1-RA-003: every (table_oid, entity_key) pair imported once at a Vn baseline migration's
-     * apply time - rows that legitimately predate the audit trigger's own existence, never events. */
+    /** P1-RA-003/P1-R2-002: every (table_oid, entity_key) pair captured once by V18's activation
+     * ceremony - LEGACY_UNVERIFIED (present at the moment the ceremony ran), never VALID/AUTHORIZED/
+     * AUDITED; these rows' own creation was never itself observed by this audit trail. Never events,
+     * never a hash chain entry. See Reconciler's class javadoc for the full semantics. */
     Set<String> baselineImportedKeys(long tableOid) throws SQLException {
         var out = new HashSet<String>();
         try (var ps = connection.prepareStatement("select entity_key_canonical from stir_audit.baseline_import where table_oid = ?")) {
@@ -259,6 +261,35 @@ public final class AuditSql implements AutoCloseable {
      * visible to one read and not another. No application-level lock of any kind. */
     record TableSnapshot(Set<String> live, Set<String> expectedLive, Set<String> baselineImported) {}
 
+    private boolean priorAutoCommitBeforeOpenSnapshot;
+
+    /** P1-R2 ChainVerifier race fix: begins a REPEATABLE READ, READ ONLY transaction that stays
+     * open ACROSS multiple subsequent calls (unlike readConsistentTableSnapshot above, which opens,
+     * reads, and closes within one method) until endRepeatableReadSnapshot() closes it. Codex's
+     * second reaudit found `ChainVerifier.reconcileStreamFrom()` read `stream_head` and
+     * `mutation_event` via two separate autocommit calls (PRE-FIX `ChainVerifier.java:74,78`) - a
+     * commit landing between them could produce a transiently inconsistent view (a live head the
+     * event read hasn't caught up to yet, or vice versa), surfacing as a false
+     * `EXPECTED_EVENT_MISSING`/`STREAM_HEAD_MISMATCH`. Exposing explicit begin/end (rather than one
+     * black-box method like readConsistentTableSnapshot) specifically lets a test interleave a real
+     * writer commit between the head-read and the events-read and prove the snapshot still holds -
+     * see VerifierDetectionTest's ChainVerifier race tests. */
+    void beginRepeatableReadSnapshot() throws SQLException {
+        priorAutoCommitBeforeOpenSnapshot = connection.getAutoCommit();
+        connection.setAutoCommit(false);
+        try (var st = connection.createStatement()) {
+            st.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY");
+        }
+    }
+
+    void endRepeatableReadSnapshot() throws SQLException {
+        try {
+            connection.commit(); // read-only; commit vs rollback is immaterial, commit releases resources promptly
+        } finally {
+            connection.setAutoCommit(priorAutoCommitBeforeOpenSnapshot);
+        }
+    }
+
     TableSnapshot readConsistentTableSnapshot(TableCoverage table) throws SQLException {
         boolean priorAutoCommit = connection.getAutoCommit();
         connection.setAutoCommit(false);
@@ -290,16 +321,23 @@ public final class AuditSql implements AutoCloseable {
     record IncidentToRecord(UUID tenantId, String domain, UUID auditEventId, String reasonCode, String evidenceJson, String dedupKey) {}
 
     /** Records a verdict, optionally one incident, and advances the observability cursor, all in
-     * one JDBC transaction. `incident` is null for every non-VIOLATION verdict. */
-    void recordVerdictAtomically(UUID auditEventId, String ruleVersion, VerificationVerdict verdict,
-                                  String reason, IncidentToRecord incident, String cursorName) throws SQLException {
+     * one JDBC transaction. `incident` is null for every non-VIOLATION verdict. Returns true only
+     * when a NEW `security_incident` row was actually inserted (never for a non-incident verdict,
+     * never when `ON CONFLICT (dedup_key) DO NOTHING` silently deduplicated an already-known
+     * incident) - callers (VerifierLoop) use this to emit the external CRITICAL log line exactly
+     * once per durable incident, not once per poll cycle that happens to re-observe a persistent
+     * condition (the alert-storm half of Codex's second reaudit: dedup_key already deduplicated the
+     * DB row, but the log line printed unconditionally on every cycle regardless). */
+    boolean recordVerdictAtomically(UUID auditEventId, String ruleVersion, VerificationVerdict verdict,
+                                     String reason, IncidentToRecord incident, String cursorName) throws SQLException {
         boolean priorAutoCommit = connection.getAutoCommit();
         connection.setAutoCommit(false);
         try {
             upsertVerificationResultTx(auditEventId, ruleVersion, verdict, reason);
-            if (incident != null) insertSecurityIncidentTx(incident);
+            boolean newIncident = incident != null && insertSecurityIncidentTx(incident);
             if (cursorName != null) writeCursorTx(cursorName, auditEventId);
             connection.commit();
+            return newIncident;
         } catch (SQLException | RuntimeException ex) {
             connection.rollback();
             throw ex;
@@ -311,15 +349,17 @@ public final class AuditSql implements AutoCloseable {
     /** Same atomicity guarantee as recordVerdictAtomically, for a chain-level incident detected by
      * periodic full reconciliation (P1-RA-007), which has no single audit_event_id to anchor a
      * verification_result row to - only the incident (deduplicated by dedup_key) and the
-     * reconciliation checkpoint advance together. */
-    void recordChainIncidentAtomically(IncidentToRecord incident, UUID tenant, String domain,
-                                        long verifiedThroughSequence, byte[] verifiedHead) throws SQLException {
+     * reconciliation checkpoint advance together. Returns true only when a NEW incident row was
+     * inserted, same alert-dedup contract as recordVerdictAtomically above. */
+    boolean recordChainIncidentAtomically(IncidentToRecord incident, UUID tenant, String domain,
+                                           long verifiedThroughSequence, byte[] verifiedHead) throws SQLException {
         boolean priorAutoCommit = connection.getAutoCommit();
         connection.setAutoCommit(false);
         try {
-            if (incident != null) insertSecurityIncidentTx(incident);
+            boolean newIncident = incident != null && insertSecurityIncidentTx(incident);
             upsertChainCheckpointTx(tenant, domain, verifiedThroughSequence, verifiedHead);
             connection.commit();
+            return newIncident;
         } catch (SQLException | RuntimeException ex) {
             connection.rollback();
             throw ex;
@@ -341,18 +381,24 @@ public final class AuditSql implements AutoCloseable {
 
     /** For a Reconciler row-existence finding, which has no single audit_event_id to attach a
      * verification_result to and no chain checkpoint to advance - just the incident, deduplicated
-     * by dedup_key. A single INSERT is already atomic on its own; no explicit transaction needed. */
-    void recordIncidentOnly(IncidentToRecord incident) throws SQLException {
-        insertSecurityIncidentTx(incident);
+     * by dedup_key. A single INSERT is already atomic on its own; no explicit transaction needed.
+     * Returns true only when a NEW incident row was inserted (alert-dedup contract, see
+     * recordVerdictAtomically). */
+    boolean recordIncidentOnly(IncidentToRecord incident) throws SQLException {
+        return insertSecurityIncidentTx(incident);
     }
 
-    private void insertSecurityIncidentTx(IncidentToRecord incident) throws SQLException {
+    /** Returns true iff this call actually inserted a new row (i.e. `dedup_key` had never been seen
+     * before) - false when `ON CONFLICT DO NOTHING` silently deduplicated an already-known
+     * incident. `executeUpdate()`'s row count on an `ON CONFLICT DO NOTHING` statement is exactly
+     * 0 for a deduplicated no-op and 1 for a real insert, so no `RETURNING` clause is needed. */
+    private boolean insertSecurityIncidentTx(IncidentToRecord incident) throws SQLException {
         try (var ps = connection.prepareStatement(
                 "insert into stir_audit.security_incident (tenant_id, domain, audit_event_id, reason_code, evidence, dedup_key) " +
                 "values (?,?,?,?,?::jsonb,?) on conflict (dedup_key) do nothing")) {
             ps.setObject(1, incident.tenantId()); ps.setString(2, incident.domain()); ps.setObject(3, incident.auditEventId());
             ps.setString(4, incident.reasonCode()); ps.setString(5, incident.evidenceJson()); ps.setString(6, incident.dedupKey());
-            ps.executeUpdate();
+            return ps.executeUpdate() > 0;
         }
     }
 

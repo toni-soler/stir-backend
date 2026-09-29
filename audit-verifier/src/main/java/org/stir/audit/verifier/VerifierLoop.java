@@ -41,6 +41,11 @@ final class VerifierLoop {
                 runIncrementalPass(sql);
                 cycleCount++;
                 if (cycleCount % PERIODIC_RECONCILE_EVERY_N_CYCLES == 0) runPeriodicChainReconciliation(sql);
+                // Persistent/open incident count for /health, always refreshed AFTER both passes so
+                // it reflects anything the periodic pass just added this cycle too - deliberately
+                // separate from the CRITICAL log gating above: this is allowed, and meant, to stay
+                // "open" every cycle without re-triggering a new external alert (see runIncrementalPass).
+                health.setOpenIncidentCount(sql.countIncidents());
                 health.markCycleSuccess();
             } catch (Exception e) {
                 health.markCycleError(e.toString());
@@ -90,8 +95,13 @@ final class VerifierLoop {
                 // P1-RA-002: verdict + incident + cursor advance, one transaction. A crash at any
                 // point in between leaves nothing committed; fetchUnverifiedEvents finds this exact
                 // event again next cycle since no verification_result row exists for it yet.
-                sql.recordVerdictAtomically(event.auditEventId(), ruleVersion, finalVerdict, reason, incident, config.cursorName());
-                if (incident != null) {
+                boolean isNewIncident = sql.recordVerdictAtomically(event.auditEventId(), ruleVersion, finalVerdict, reason, incident, config.cursorName());
+                // Alert-dedup fix: fetchUnverifiedEvents anti-joins on verification_result, so in
+                // practice this exact branch only ever sees a genuinely new event - isNewIncident is
+                // checked anyway for the same reason the Reconciler/chain-reconciliation branches
+                // below need it: a uniform, always-correct "only log what wasn't already known" rule,
+                // not one that quietly depends on fetchUnverifiedEvents' own anti-join to hold.
+                if (incident != null && isNewIncident) {
                     System.out.println("level=CRITICAL component=stir-audit-verifier reason_code=" + incident.reasonCode() +
                         " tenant_id=" + incident.tenantId() + " domain=" + incident.domain() + " audit_event_id=" + incident.auditEventId() +
                         " dedup_key=" + incident.dedupKey() + " evidence=" + incident.evidenceJson());
@@ -101,17 +111,23 @@ final class VerifierLoop {
         } while (batch.size() == 500);
 
         // Reconciler stays a per-cycle pass (cheap relative to a full chain re-hash): it only
-        // compares row existence against mutation_event's own claims, not per-link hash math.
+        // compares row existence against mutation_event's own claims, not per-link hash math. Unlike
+        // the incremental pass above, THIS is exactly the case Codex's second reaudit caught: a
+        // structural condition (a row with no event) is persistent and gets rediscovered every
+        // cycle, so dedup_key alone (a DB-level no-op) is not enough - the CRITICAL log line itself
+        // must only fire when insertSecurityIncidentTx() reports a genuinely new row.
         var reconciler = new Reconciler(sql);
         for (Reconciler.Finding finding : reconciler.reconcileAll()) {
             String dedupKey = "RECONCILE:" + finding.tableOid() + ":" + finding.entityKeyCanonical() + ":" + finding.reasonCode();
             String evidence = "{\"table\":\"" + finding.tableName() + "\",\"entityKey\":\"" +
                 jsonEscape(finding.entityKeyCanonical()) + "\",\"detail\":\"" + jsonEscape(finding.detail()) + "\"}";
             var incident = new AuditSql.IncidentToRecord(null, null, null, finding.reasonCode(), evidence, dedupKey);
-            sql.recordIncidentOnly(incident);
-            System.out.println("level=CRITICAL component=stir-audit-verifier reason_code=" + finding.reasonCode() +
-                " table=" + finding.tableName() + " dedup_key=" + dedupKey + " evidence=" + evidence);
-            System.out.flush();
+            boolean isNewIncident = sql.recordIncidentOnly(incident);
+            if (isNewIncident) {
+                System.out.println("level=CRITICAL component=stir-audit-verifier reason_code=" + finding.reasonCode() +
+                    " table=" + finding.tableName() + " dedup_key=" + dedupKey + " evidence=" + evidence);
+                System.out.flush();
+            }
         }
         if (reportedThisCycle > 0) System.out.println("level=INFO component=stir-audit-verifier cycle_violations=" + reportedThisCycle);
     }
@@ -143,11 +159,15 @@ final class VerifierLoop {
                 String evidence = "{\"tenant\":\"" + tenant + "\",\"domain\":\"" + domain + "\",\"detail\":\"" + jsonEscape(broken.detail()) + "\"}";
                 var incident = new AuditSql.IncidentToRecord(tenant, domain, null, "CHAIN_RECONCILE_" + broken.reasonCode(), evidence, dedupKey);
                 // Do NOT advance the checkpoint past a break - the same gap must be re-detected
-                // (and re-deduplicated) on every later cycle until resolved.
-                sql.recordChainIncidentAtomically(incident, tenant, domain, checkpoint.lastVerifiedSequence(), checkpoint.lastVerifiedHead());
-                System.out.println("level=CRITICAL component=stir-audit-verifier reason_code=CHAIN_RECONCILE_" + broken.reasonCode() +
-                    " tenant_id=" + tenant + " domain=" + domain + " dedup_key=" + dedupKey + " evidence=" + evidence);
-                System.out.flush();
+                // (and re-deduplicated) on every later cycle until resolved. The break itself is a
+                // persistent condition re-discovered every periodic pass, exactly the alert-storm
+                // shape Codex's second reaudit found here specifically - only log when genuinely new.
+                boolean isNewIncident = sql.recordChainIncidentAtomically(incident, tenant, domain, checkpoint.lastVerifiedSequence(), checkpoint.lastVerifiedHead());
+                if (isNewIncident) {
+                    System.out.println("level=CRITICAL component=stir-audit-verifier reason_code=CHAIN_RECONCILE_" + broken.reasonCode() +
+                        " tenant_id=" + tenant + " domain=" + domain + " dedup_key=" + dedupKey + " evidence=" + evidence);
+                    System.out.flush();
+                }
             } else {
                 sql.recordChainIncidentAtomically(null, tenant, domain, outcome.verifiedThroughSequence(), outcome.verifiedHead());
             }

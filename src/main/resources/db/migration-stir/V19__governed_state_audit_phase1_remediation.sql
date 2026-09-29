@@ -1,73 +1,24 @@
 -- TAMPER-EVIDENT GOVERNED STATE AUDIT MVP — Phase 1 remediation, per Codex's independent
--- adversarial reaudit (REVALIDATION_GOVERNED_STATE_AUDIT_PHASE1.md). Findings addressed here at
--- the schema level: P1-RA-002 (incident dedup + atomicity substrate), P1-RA-003 (baseline import,
--- so a real upgrade does not manufacture false CRITICAL noise from pre-existing rows),
--- P1-RA-005 (a new, versioned hash profile that additionally commits audit_event_id, db_time,
--- txid, event_format_version, client/correlation metadata - V18's original profile/events are
--- NEVER retroactively reinterpreted), P1-RA-007 (a durable checkpoint table for periodic full-
--- chain reconciliation, separate from incremental per-event processing). P1-RA-001, P1-RA-004 and
--- P1-RA-006 are primarily Java/test-side fixes (audit-verifier's polling query, IntegrityRule, and
--- a new stir-backend-side coverage test) and do not need schema changes beyond what is here.
+-- adversarial reaudit (REVALIDATION_GOVERNED_STATE_AUDIT_PHASE1.md) and second reaudit
+-- (SECOND_REVALIDATION_GOVERNED_STATE_AUDIT_PHASE1.md). Findings addressed here at the schema
+-- level: P1-RA-002 (incident dedup + atomicity substrate), P1-RA-005 (a new, versioned hash profile
+-- that additionally commits audit_event_id, db_time, txid, event_format_version, client/correlation
+-- metadata - V18's original profile/events are NEVER retroactively reinterpreted), P1-RA-007 (a
+-- durable checkpoint table for periodic full-chain reconciliation, separate from incremental
+-- per-event processing), and a P1-RA-006 defense-in-depth re-check. P1-RA-001, P1-RA-004, P1-R2-001
+-- and the ChainVerifier race are Java/test-side fixes and do not need schema changes.
+--
+-- P1-R2-002 (second reaudit): baseline_import + its population, and the coverage-classification
+-- NO_PRIVILEGE_CATALOG check, MOVED to V18 in this same commit (see V18's own "activation_marker /
+-- baseline_import" section) - V18/V19 were never published/deployed before this change, so fixing
+-- the unpublished migration directly is cleaner than layering correct semantics on top of an
+-- incorrect one in a new V20 (see V18's comment for why: baseline capture now happens table-by-
+-- table, LOCK-protected, in the SAME transaction as that table's own trigger activation, closing
+-- the ordinary-writer race the original split V18/V19 design left open). `git log -p` on both files
+-- across this commit is the exact before/after comparison Codex asked for.
 --
 -- Does NOT close AUD-012. Does NOT touch Seven Keys/Guardian/Ordinary Governance/osTRIS/Agreement
--- semantics. Does NOT add external anchoring or a consumption gate. Additive only, on top of V18;
--- no V18 statement is edited or reordered.
-
-SET ROLE stir_audit_owner;
-
--- ===== P1-RA-003: baseline import. A snapshot, taken once at this migration's apply time, of
--- every PK that already existed in a COVERED table before the audit trigger could have witnessed
--- its creation. NEVER an event - no mutation_event row is inserted for these, and no hash chain
--- entry is fabricated. Reconciler consults this table to distinguish "legitimately pre-existing,
--- never audited because audit did not exist yet" from "a new row that skipped the trigger", which
--- is the only distinction CLAUDE_GOVERNED_STATE_AUDIT_ORDERS.md's remediation actually asks for. =====
-CREATE TABLE stir_audit.baseline_import (
-  table_oid             oid NOT NULL,
-  entity_key_canonical  text NOT NULL,
-  tenant_id             uuid,                 -- best-effort, for observability/filtering only
-  imported_at           timestamptz NOT NULL DEFAULT now(),
-  import_batch          uuid NOT NULL,        -- groups every row from the same migration/import run
-  PRIMARY KEY (table_oid, entity_key_canonical)
-);
-REVOKE ALL ON TABLE stir_audit.baseline_import FROM PUBLIC;
-GRANT SELECT ON TABLE stir_audit.baseline_import TO stir_auditor;
--- No RLS, same reasoning as coverage_registry: migrator-only writer, schema metadata rather than
--- tenant business data, read cross-tenant by the auditor by design.
-
-RESET ROLE;
--- Back to postgres/migrator for this block: it SELECTs FROM stir.* tables to snapshot existing
--- PKs, and stir_audit_owner deliberately has no grant on stir.* at all (only stir_auditor does,
--- per V18) - found by actually running this migration, same "permission denied" pattern as V18's
--- own findings, not by inspection.
-
-DO $do_baseline$
-DECLARE
-  r record;
-  v_batch uuid := gen_random_uuid();
-  v_count bigint;
-BEGIN
-  FOR r IN SELECT table_oid, table_name, pk_columns FROM stir_audit.coverage_registry WHERE coverage_status = 'COVERED'
-  LOOP
-    -- Exact same canonical-key construction the trigger uses (unnest(...) WITH ORDINALITY +
-    -- col=value;col2=value2), duplicated deliberately rather than factored into a shared function
-    -- called by both: emit_mutation_event() must never change behavior for already-hashed V18
-    -- events, and importing this migration-only, run-once snapshot logic into that hot path would
-    -- only add risk for zero benefit (P1-RA-005's same "do not silently touch what is already
-    -- hashed" discipline, applied here to structural behavior instead of the hash formula itself).
-    EXECUTE format($f$
-      INSERT INTO stir_audit.baseline_import (table_oid, entity_key_canonical, tenant_id, import_batch)
-      SELECT %L::oid,
-             (SELECT string_agg(u.col || '=' || COALESCE(to_jsonb(t)::jsonb ->> u.col, E'\\N'), ';' ORDER BY u.ord)
-                FROM unnest(%L::text[]) WITH ORDINALITY AS u(col, ord)),
-             NULLIF(to_jsonb(t)::jsonb ->> 'tenant_id', '')::uuid,
-             %L::uuid
-      FROM stir.%I t
-      ON CONFLICT (table_oid, entity_key_canonical) DO NOTHING
-    $f$, r.table_oid, r.pk_columns, v_batch, r.table_name);
-    GET DIAGNOSTICS v_count = ROW_COUNT;
-    RAISE NOTICE 'stir_audit: baseline_import seeded % rows for stir.%', v_count, r.table_name;
-  END LOOP;
-END $do_baseline$;
+-- semantics. Does NOT add external anchoring or a consumption gate. Additive only, on top of V18.
 
 -- ===== P1-RA-002 / P1-RA-007: security_incident gains a deterministic dedup key so re-detecting
 -- the same problem (a crash-recovery reprocessing an event, or a periodic chain scan re-observing
@@ -290,18 +241,12 @@ RESET ROLE;
 -- mutation_event and verification_result on audit_event_id - both sides already have that column
 -- as (part of) their primary key from V18, so no additional index is needed here.
 
--- ===== P1-RA-006: V18's coverage_registry population classified a table 'NO_PRIVILEGE_CATALOG'
--- by checking ONLY has_table_privilege('idax_app', ..., 'INSERT') - a table where idax_app has no
--- INSERT but DOES have UPDATE or DELETE would have been wrongly bucketed as "no runtime role can
--- ever mutate them" while in fact idax_app could silently mutate existing rows via UPDATE/DELETE
--- with zero audit trigger coverage. No table in this schema is actually affected today (re-verified
--- below, at every migration run, not just once): stir.category/stir.resource_kind (the only two
--- NO_PRIVILEGE_CATALOG rows V18 produced) have only SELECT granted to idax_app (V1__listings.sql),
--- so INSERT/UPDATE/DELETE are all absent. This block re-verifies that invariant live, for every
--- coverage_registry row of either classification, and fails closed (RAISE EXCEPTION, aborting the
--- migration) if it is ever violated - by a manual grant drift on an existing table, or by a future
--- migration adding a new table whose privilege surface does not match its stored classification.
--- A COVERED table is exempt from this check by construction: it already has a trigger. =====
+-- ===== P1-RA-006 defense-in-depth: V18's coverage_registry population already checks
+-- INSERT/UPDATE/DELETE (not just INSERT - the original gap Codex's first reaudit found) directly at
+-- classification time now. This block independently RE-verifies the same invariant against the
+-- schema as it stands after V19 has fully applied - cheap, and catches a manual grant drift or a
+-- future migration that adds a new table without going through V18's own classification loop at
+-- all. A COVERED table is exempt from this check by construction: it already has a trigger. =====
 DO $do_coverage_privilege_reverify$
 DECLARE
   r record;

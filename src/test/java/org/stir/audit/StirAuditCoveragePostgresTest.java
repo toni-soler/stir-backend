@@ -94,4 +94,29 @@ class StirAuditCoveragePostgresTest {
             db.execute("drop table stir.synthetic_ungoverned_test_table");
         }
     }
+
+    /** Item 6 (SECOND_REVALIDATION_GOVERNED_STATE_AUDIT_PHASE1.md): Codex's own reproduction created
+     * three temporary tables, `stir.audit_probe_{insert,update,delete}`, each with ONLY the one
+     * named grant and no classification, confirming the coverage query caught all three variants
+     * independently - not just a table with all three grants combined at once (which the existing
+     * `syntheticUngovernedTableWithRuntimeGrantsTripsTheCoverageGate` above already proves via a
+     * different mechanism). Reproduced here verb-by-verb for direct traceability against that exact
+     * finding. */
+    @Test void ungovernedTableWithOnlyOneOfInsertUpdateOrDeleteEachTripsTheGateIndependently() throws Exception {
+        var db = migrate();
+        for (String verb : List.of("insert", "update", "delete")) {
+            String tableName = "audit_probe_" + verb;
+            db.execute("create table stir." + tableName + " (id uuid primary key default gen_random_uuid(), tenant_id uuid not null)");
+            try {
+                db.execute("grant " + verb + " on stir." + tableName + " to idax_app");
+                Long unclassified = db.queryForObject("""
+                    select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace
+                    where n.nspname = 'stir' and c.relname = ? and c.oid not in (select table_oid from stir_audit.coverage_registry)
+                    """, Long.class, tableName);
+                assertEquals(1L, unclassified, "stir." + tableName + " (only " + verb.toUpperCase() + " granted, no registry row) must trip the fail-closed gate on its own");
+            } finally {
+                db.execute("drop table stir." + tableName);
+            }
+        }
+    }
 }

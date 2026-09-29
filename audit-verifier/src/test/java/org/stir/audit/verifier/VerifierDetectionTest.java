@@ -913,4 +913,354 @@ class VerifierDetectionTest {
             }
         }
     }
+
+    /** P1-R2-002, "V16 -> audit activation": pre-existing data from BEFORE the audit trigger existed
+     * at all (not merely before V19, the original split design's boundary) must still classify as
+     * LEGACY_UNVERIFIED with zero false CRITICAL, now that baseline capture lives inside V18 itself. */
+    @Test void v16DataMigratesThroughActivationAsLegacyUnverifiedWithoutFalseCritical() throws Exception {
+        try (PostgreSQLContainer<?> freshPg = AuditTestSupport.newPostgres()) {
+            freshPg.start();
+            try (Connection c = DriverManager.getConnection(freshPg.getJdbcUrl(), freshPg.getUsername(), freshPg.getPassword());
+                 Statement st = c.createStatement()) {
+                st.execute("create role idax_app; create role idax_admin; create role idax_backend login password 'x' inherit; grant idax_app, idax_admin to idax_backend");
+            }
+            Flyway.configure().dataSource(freshPg.getJdbcUrl(), freshPg.getUsername(), freshPg.getPassword())
+                .schemas("stir").locations("filesystem:../src/main/resources/db/migration-stir").target("16").load().migrate();
+
+            UUID legacyDefId = UUID.randomUUID(), legacyTenant = UUID.randomUUID(), legacyCommunity = UUID.randomUUID(), legacyUnit = UUID.randomUUID();
+            try (Connection c = DriverManager.getConnection(freshPg.getJdbcUrl(), freshPg.getUsername(), freshPg.getPassword());
+                 Statement st = c.createStatement()) {
+                // No trigger exists at all at V16 - a plain INSERT as postgres is enough, no
+                // session_replication_role trick needed (that trick is only for AFTER activation).
+                st.execute("insert into stir.reference_definition values ('" + legacyDefId + "','" + legacyTenant + "','" + legacyCommunity +
+                    "','" + legacyUnit + "','v16-legacy-name','scope','{}','1','unit','ref','" + UUID.randomUUID() + "',now())");
+            }
+
+            Flyway.configure().dataSource(freshPg.getJdbcUrl(), freshPg.getUsername(), freshPg.getPassword())
+                .schemas("stir").locations("filesystem:../src/main/resources/db/migration-stir").load().migrate();
+            try (Connection c = DriverManager.getConnection(freshPg.getJdbcUrl(), freshPg.getUsername(), freshPg.getPassword());
+                 Statement st = c.createStatement()) {
+                st.execute("alter role stir_auditor with password '" + AuditTestSupport.STIR_AUDITOR_PASSWORD + "'");
+            }
+            Config freshConfig = new Config(freshPg.getJdbcUrl(), "stir_auditor", AuditTestSupport.STIR_AUDITOR_PASSWORD, 200L, 0, "test");
+
+            try (AuditSql sql = new AuditSql(freshConfig)) {
+                assertTrue(sql.baselineImportedKeys(sql.fetchCoveredTables().stream()
+                        .filter(t -> "reference_definition".equals(t.tableName())).findFirst().orElseThrow().tableOid())
+                    .stream().anyMatch(k -> k.contains(legacyDefId.toString())), "the V16-era row must be captured as LEGACY_UNVERIFIED baseline");
+                var findings = new Reconciler(sql).reconcileAll();
+                assertTrue(findings.stream().noneMatch(f -> f.entityKeyCanonical() != null && f.entityKeyCanonical().contains(legacyDefId.toString())),
+                    "V16 data migrated through activation must produce zero false CRITICAL");
+            }
+        }
+    }
+
+    /** P1-R2-001: the exact false-CRITICAL reproduction from SECOND_REVALIDATION_GOVERNED_STATE_
+     * AUDIT_PHASE1.md - a fully legitimate SIGNAL(originator)->UNDER_REVIEW(decisor)->FINAL(decisor)
+     * backlog, processed through the REAL production pipeline
+     * (VerifierLoop.runOneIncrementalPassForTest, not a direct call to DomainRuleEngine.evaluate on
+     * a single hand-picked event) must classify all three events PASS_STRUCTURE_ONLY with ZERO
+     * incidents. The first remediation round's own regression test only ever evaluated the LAST
+     * event in isolation, which is exactly why it never caught that the SIGNAL event itself used to
+     * get a false VIOLATION/DECISOR_EQUALS_ORIGINATOR from the old rule's history/actor mismatch. */
+    @Test void fullBacklogOfLegitimateSignalUnderReviewFinalProducesZeroIncidents() throws Exception {
+        UUID tenant = UUID.randomUUID(), community = UUID.randomUUID();
+        UUID caseId = UUID.randomUUID(), originator = UUID.randomUUID(), decisor = UUID.randomUUID();
+        try (Connection c = admin()) {
+            UUID[] refs = insertReferenceChain(c, tenant, community);
+            try (Statement st = c.createStatement()) {
+                st.execute("insert into stir.market_integrity_case values ('" + caseId + "','" + tenant + "','" + refs[0] + "','" + refs[1] +
+                    "','SIGNAL_CODE','reason','[]','" + originator + "',now())");
+                st.execute("insert into stir.market_integrity_case_event (id,tenant_id,case_id,status,reason,actor_id,recorded_at,sequence) values ('" +
+                    UUID.randomUUID() + "','" + tenant + "','" + caseId + "','SIGNAL','signal reason','" + originator + "',now(),1)");
+                st.execute("insert into stir.market_integrity_case_event (id,tenant_id,case_id,status,reason,actor_id,recorded_at,sequence) values ('" +
+                    UUID.randomUUID() + "','" + tenant + "','" + caseId + "','UNDER_REVIEW','review reason','" + decisor + "',now(),2)");
+                st.execute("insert into stir.market_integrity_case_event (id,tenant_id,case_id,status,reason,actor_id,recorded_at,sequence) values ('" +
+                    UUID.randomUUID() + "','" + tenant + "','" + caseId + "','FINAL','final reason','" + decisor + "',now(),3)");
+            }
+        }
+        var health = new HealthServer();
+        try (AuditSql sql = new AuditSql(config)) {
+            new VerifierLoop(config, health).runOneIncrementalPassForTest(sql);
+        }
+        try (AuditSql sql = new AuditSql(config)) {
+            var results = sql.queryStringList(
+                "select cev.status || ':' || vr.result from stir_audit.mutation_event me " +
+                "join stir_audit.verification_result vr on vr.audit_event_id = me.audit_event_id " +
+                "join stir.market_integrity_case_event cev on cev.id::text = me.entity_key ->> 'id' " +
+                "where me.tenant_id = ?::uuid and me.table_name = 'market_integrity_case_event' order by cev.sequence",
+                tenant.toString());
+            assertEquals(List.of("SIGNAL:PASS_STRUCTURE_ONLY", "UNDER_REVIEW:PASS_STRUCTURE_ONLY", "FINAL:PASS_STRUCTURE_ONLY"), results,
+                "processing the FULL backlog of a legitimate case must classify every event PASS_STRUCTURE_ONLY - the SIGNAL event specifically must never come back VIOLATION");
+            long incidentCount = sql.queryLong("select count(*) from stir_audit.security_incident where tenant_id = ?::uuid", tenant.toString());
+            assertEquals(0, incidentCount, "P1-R2-001: a fully legitimate backlog must produce ZERO incidents");
+        }
+    }
+
+    /** P1-R2-001 negative matrix addition: "reorder" - UNDER_REVIEW displaced to AFTER a terminal
+     * FINAL instead of before it (a minimal 3-event shape, distinct from
+     * eventAfterTerminalStateIsViolation's 4-event one). */
+    @Test void reorderedUnderReviewAfterFinalIsViolation() throws Exception {
+        UUID tenant = UUID.randomUUID(), community = UUID.randomUUID();
+        UUID caseId = UUID.randomUUID(), originator = UUID.randomUUID(), decisor = UUID.randomUUID();
+        try (Connection c = admin()) {
+            UUID[] refs = insertReferenceChain(c, tenant, community);
+            try (Statement st = c.createStatement()) {
+                st.execute("insert into stir.market_integrity_case values ('" + caseId + "','" + tenant + "','" + refs[0] + "','" + refs[1] +
+                    "','SIGNAL_CODE','reason','[]','" + originator + "',now())");
+                st.execute("insert into stir.market_integrity_case_event (id,tenant_id,case_id,status,reason,actor_id,recorded_at,sequence) values ('" +
+                    UUID.randomUUID() + "','" + tenant + "','" + caseId + "','SIGNAL','s','" + originator + "',now(),1)");
+                st.execute("insert into stir.market_integrity_case_event (id,tenant_id,case_id,status,reason,actor_id,recorded_at,sequence) values ('" +
+                    UUID.randomUUID() + "','" + tenant + "','" + caseId + "','FINAL','f','" + decisor + "',now(),2)");
+                st.execute("insert into stir.market_integrity_case_event (id,tenant_id,case_id,status,reason,actor_id,recorded_at,sequence) values ('" +
+                    UUID.randomUUID() + "','" + tenant + "','" + caseId + "','UNDER_REVIEW','reordered','" + decisor + "',now(),3)");
+            }
+        }
+        try (AuditSql sql = new AuditSql(config)) {
+            var lastEvent = sql.fetchUnverifiedEvents(DomainRuleEngine.RULE_VERSION, 500).stream()
+                .filter(e -> "market_integrity_case_event".equals(e.tableName()) && tenant.equals(e.tenantId())).reduce((a, b) -> b).orElseThrow();
+            var verdict = new DomainRuleEngine().evaluate(lastEvent, sql);
+            assertEquals(VerificationVerdict.VIOLATION, verdict.verdict());
+            assertEquals("EVENT_AFTER_TERMINAL_STATE", verdict.reasonCode());
+        }
+    }
+
+    @Test void secondTerminalStateAfterFirstIsViolation() throws Exception {
+        UUID tenant = UUID.randomUUID(), community = UUID.randomUUID();
+        UUID caseId = UUID.randomUUID(), originator = UUID.randomUUID(), decisor = UUID.randomUUID();
+        try (Connection c = admin()) {
+            UUID[] refs = insertReferenceChain(c, tenant, community);
+            try (Statement st = c.createStatement()) {
+                st.execute("insert into stir.market_integrity_case values ('" + caseId + "','" + tenant + "','" + refs[0] + "','" + refs[1] +
+                    "','SIGNAL_CODE','reason','[]','" + originator + "',now())");
+                st.execute("insert into stir.market_integrity_case_event (id,tenant_id,case_id,status,reason,actor_id,recorded_at,sequence) values ('" +
+                    UUID.randomUUID() + "','" + tenant + "','" + caseId + "','SIGNAL','s','" + originator + "',now(),1)");
+                st.execute("insert into stir.market_integrity_case_event (id,tenant_id,case_id,status,reason,actor_id,recorded_at,sequence) values ('" +
+                    UUID.randomUUID() + "','" + tenant + "','" + caseId + "','UNDER_REVIEW','r','" + decisor + "',now(),2)");
+                st.execute("insert into stir.market_integrity_case_event (id,tenant_id,case_id,status,reason,actor_id,recorded_at,sequence) values ('" +
+                    UUID.randomUUID() + "','" + tenant + "','" + caseId + "','FINAL','f','" + decisor + "',now(),3)");
+                st.execute("insert into stir.market_integrity_case_event (id,tenant_id,case_id,status,reason,actor_id,recorded_at,sequence) values ('" +
+                    UUID.randomUUID() + "','" + tenant + "','" + caseId + "','DISMISSED','second-terminal','" + decisor + "',now(),4)");
+            }
+        }
+        try (AuditSql sql = new AuditSql(config)) {
+            var lastEvent = sql.fetchUnverifiedEvents(DomainRuleEngine.RULE_VERSION, 500).stream()
+                .filter(e -> "market_integrity_case_event".equals(e.tableName()) && tenant.equals(e.tenantId())).reduce((a, b) -> b).orElseThrow();
+            var verdict = new DomainRuleEngine().evaluate(lastEvent, sql);
+            assertEquals(VerificationVerdict.VIOLATION, verdict.verdict());
+            assertEquals("EVENT_AFTER_TERMINAL_STATE", verdict.reasonCode());
+        }
+    }
+
+    @Test void eventAfterDismissedIsViolation() throws Exception {
+        UUID tenant = UUID.randomUUID(), community = UUID.randomUUID();
+        UUID caseId = UUID.randomUUID(), originator = UUID.randomUUID(), decisor = UUID.randomUUID();
+        try (Connection c = admin()) {
+            UUID[] refs = insertReferenceChain(c, tenant, community);
+            try (Statement st = c.createStatement()) {
+                st.execute("insert into stir.market_integrity_case values ('" + caseId + "','" + tenant + "','" + refs[0] + "','" + refs[1] +
+                    "','SIGNAL_CODE','reason','[]','" + originator + "',now())");
+                st.execute("insert into stir.market_integrity_case_event (id,tenant_id,case_id,status,reason,actor_id,recorded_at,sequence) values ('" +
+                    UUID.randomUUID() + "','" + tenant + "','" + caseId + "','SIGNAL','s','" + originator + "',now(),1)");
+                st.execute("insert into stir.market_integrity_case_event (id,tenant_id,case_id,status,reason,actor_id,recorded_at,sequence) values ('" +
+                    UUID.randomUUID() + "','" + tenant + "','" + caseId + "','UNDER_REVIEW','r','" + decisor + "',now(),2)");
+                st.execute("insert into stir.market_integrity_case_event (id,tenant_id,case_id,status,reason,actor_id,recorded_at,sequence) values ('" +
+                    UUID.randomUUID() + "','" + tenant + "','" + caseId + "','DISMISSED','d','" + decisor + "',now(),3)");
+                st.execute("insert into stir.market_integrity_case_event (id,tenant_id,case_id,status,reason,actor_id,recorded_at,sequence) values ('" +
+                    UUID.randomUUID() + "','" + tenant + "','" + caseId + "','UNDER_REVIEW','reopened-after-dismissed','" + decisor + "',now(),4)");
+            }
+        }
+        try (AuditSql sql = new AuditSql(config)) {
+            var lastEvent = sql.fetchUnverifiedEvents(DomainRuleEngine.RULE_VERSION, 500).stream()
+                .filter(e -> "market_integrity_case_event".equals(e.tableName()) && tenant.equals(e.tenantId())).reduce((a, b) -> b).orElseThrow();
+            var verdict = new DomainRuleEngine().evaluate(lastEvent, sql);
+            assertEquals(VerificationVerdict.VIOLATION, verdict.verdict());
+            assertEquals("EVENT_AFTER_TERMINAL_STATE", verdict.reasonCode());
+        }
+    }
+
+    @Test void decisorEqualsOriginatorOnDismissedIsViolation() throws Exception {
+        UUID tenant = UUID.randomUUID(), community = UUID.randomUUID();
+        UUID caseId = UUID.randomUUID(), originator = UUID.randomUUID();
+        try (Connection c = admin()) {
+            UUID[] refs = insertReferenceChain(c, tenant, community);
+            try (Statement st = c.createStatement()) {
+                st.execute("insert into stir.market_integrity_case values ('" + caseId + "','" + tenant + "','" + refs[0] + "','" + refs[1] +
+                    "','SIGNAL_CODE','reason','[]','" + originator + "',now())");
+                st.execute("insert into stir.market_integrity_case_event (id,tenant_id,case_id,status,reason,actor_id,recorded_at,sequence) values ('" +
+                    UUID.randomUUID() + "','" + tenant + "','" + caseId + "','SIGNAL','s','" + originator + "',now(),1)");
+                st.execute("insert into stir.market_integrity_case_event (id,tenant_id,case_id,status,reason,actor_id,recorded_at,sequence) values ('" +
+                    UUID.randomUUID() + "','" + tenant + "','" + caseId + "','UNDER_REVIEW','r','" + originator + "',now(),2)");
+                st.execute("insert into stir.market_integrity_case_event (id,tenant_id,case_id,status,reason,actor_id,recorded_at,sequence) values ('" +
+                    UUID.randomUUID() + "','" + tenant + "','" + caseId + "','DISMISSED','d','" + originator + "',now(),3)");
+            }
+        }
+        try (AuditSql sql = new AuditSql(config)) {
+            var lastEvent = sql.fetchUnverifiedEvents(DomainRuleEngine.RULE_VERSION, 500).stream()
+                .filter(e -> "market_integrity_case_event".equals(e.tableName()) && tenant.equals(e.tenantId())).reduce((a, b) -> b).orElseThrow();
+            var verdict = new DomainRuleEngine().evaluate(lastEvent, sql);
+            assertEquals(VerificationVerdict.VIOLATION, verdict.verdict());
+            assertEquals("DECISOR_EQUALS_ORIGINATOR", verdict.reasonCode());
+        }
+    }
+
+    /** ChainVerifier race (item 3, second reaudit): manually replicates reconcileStreamFrom's own
+     * two reads (head, then events) via the same exposed snapshot API, with a REAL writer commit to
+     * the SAME stream injected strictly between them on a separate connection - proving the shared
+     * REPEATABLE READ snapshot is not fooled, and that the deferred event reconciles cleanly next
+     * pass with no false incident. */
+    @Test void chainVerifierSnapshotIsNotRacedByWriterCommittingDuringSameStreamReconciliation() throws Exception {
+        UUID tenant = UUID.randomUUID();
+        try (Connection c = admin()) {
+            AuditTestSupport.asIdaxApp(c, tenant, () -> {
+                try (Statement st = c.createStatement()) {
+                    st.execute("insert into stir.market_constitution (id, tenant_id, community_id, authority_id, version, canonical_json, digest_sha256, activated_at) " +
+                        "values (gen_random_uuid(), '" + tenant + "', gen_random_uuid(), gen_random_uuid(), 1, '{}', 'race-seed', now())");
+                } catch (SQLException e) { throw new RuntimeException(e); }
+            });
+        }
+        String domain;
+        try (AuditSql sql = new AuditSql(config)) {
+            var event = sql.fetchUnverifiedEvents(DomainRuleEngine.RULE_VERSION, 500).stream()
+                .filter(e -> tenant.equals(e.tenantId())).findFirst().orElseThrow();
+            domain = event.domain();
+        }
+
+        try (AuditSql readerSql = new AuditSql(config)) {
+            readerSql.beginRepeatableReadSnapshot();
+            var headBefore = readerSql.currentStreamHead(tenant, domain);
+            assertEquals(1L, (long) headBefore.getKey(), "snapshot's first read must see exactly the one seeded event");
+
+            try (Connection c = admin()) {
+                AuditTestSupport.asIdaxApp(c, tenant, () -> {
+                    try (Statement st = c.createStatement()) {
+                        st.execute("insert into stir.market_constitution (id, tenant_id, community_id, authority_id, version, canonical_json, digest_sha256, activated_at) " +
+                            "values (gen_random_uuid(), '" + tenant + "', gen_random_uuid(), gen_random_uuid(), 1, '{}', 'race-during-gap', now())");
+                    } catch (SQLException e) { throw new RuntimeException(e); }
+                });
+            }
+
+            var eventsInSnapshot = readerSql.fetchStreamFrom(tenant, domain, 1);
+            readerSql.endRepeatableReadSnapshot();
+            assertEquals(1, eventsInSnapshot.size(),
+                "the events-read, sharing the SAME snapshot as the head-read, must NOT see a writer commit that landed strictly between them");
+        }
+
+        try (AuditSql sql = new AuditSql(config)) {
+            var outcome = new ChainVerifier(sql).reconcileStreamFrom(tenant, domain, 1);
+            assertInstanceOf(ChainVerifier.Ok.class, outcome.result(), "the deferred event must reconcile cleanly on the very next pass, not raise a false incident from the earlier race window");
+            assertEquals(2L, outcome.verifiedThroughSequence());
+        }
+    }
+
+    /** Same race proof, repeated cross-tenant ("otro tenant" per the reaudit order): a writer commit
+     * to a DIFFERENT tenant's stream during the reader's open snapshot must not affect the tenant
+     * actually being reconciled, and both streams must reconcile cleanly afterward. */
+    @Test void chainVerifierSnapshotIsNotRacedByWriterCommittingToDifferentTenantDuringReconciliation() throws Exception {
+        UUID tenantA = UUID.randomUUID(), tenantB = UUID.randomUUID();
+        try (Connection c = admin()) {
+            AuditTestSupport.asIdaxApp(c, tenantA, () -> {
+                try (Statement st = c.createStatement()) {
+                    st.execute("insert into stir.market_constitution (id, tenant_id, community_id, authority_id, version, canonical_json, digest_sha256, activated_at) " +
+                        "values (gen_random_uuid(), '" + tenantA + "', gen_random_uuid(), gen_random_uuid(), 1, '{}', 'race-seed-a', now())");
+                } catch (SQLException e) { throw new RuntimeException(e); }
+            });
+        }
+        String domain;
+        try (AuditSql sql = new AuditSql(config)) {
+            var event = sql.fetchUnverifiedEvents(DomainRuleEngine.RULE_VERSION, 500).stream()
+                .filter(e -> tenantA.equals(e.tenantId())).findFirst().orElseThrow();
+            domain = event.domain();
+        }
+
+        try (AuditSql readerSql = new AuditSql(config)) {
+            readerSql.beginRepeatableReadSnapshot();
+            var headBefore = readerSql.currentStreamHead(tenantA, domain);
+            assertEquals(1L, (long) headBefore.getKey());
+
+            try (Connection c = admin()) {
+                AuditTestSupport.asIdaxApp(c, tenantB, () -> {
+                    try (Statement st = c.createStatement()) {
+                        st.execute("insert into stir.market_constitution (id, tenant_id, community_id, authority_id, version, canonical_json, digest_sha256, activated_at) " +
+                            "values (gen_random_uuid(), '" + tenantB + "', gen_random_uuid(), gen_random_uuid(), 1, '{}', 'race-seed-b', now())");
+                    } catch (SQLException e) { throw new RuntimeException(e); }
+                });
+            }
+
+            var eventsForA = readerSql.fetchStreamFrom(tenantA, domain, 1);
+            readerSql.endRepeatableReadSnapshot();
+            assertEquals(1, eventsForA.size(), "tenant A's stream must be entirely unaffected by tenant B's concurrent commit to a different stream");
+        }
+
+        try (AuditSql sql = new AuditSql(config)) {
+            var chain = new ChainVerifier(sql);
+            assertInstanceOf(ChainVerifier.Ok.class, chain.reconcileStreamFrom(tenantA, domain, 1).result());
+            assertInstanceOf(ChainVerifier.Ok.class, chain.reconcileStreamFrom(tenantB, domain, 1).result());
+        }
+    }
+
+    /** Item 4 (second reaudit): a persistent, structural incident (Reconciler-discovered, and
+     * rediscovered fresh every single cycle since it is a standing condition, not a one-time event)
+     * must emit the external CRITICAL log line exactly ONCE across many cycles - dedup_key already
+     * deduplicated the DB row; the log line itself used to print unconditionally every cycle
+     * regardless. health.openIncidentCount must keep reporting it as open the whole time. */
+    @Test void persistentIncidentEmitsCriticalOnceAcrossMultipleCyclesButStaysOpenInHealth() throws Exception {
+        UUID tenant = UUID.randomUUID();
+        UUID orphanId = UUID.randomUUID();
+        try (Connection c = admin(); Statement st = c.createStatement()) {
+            st.execute("set session_replication_role = replica");
+            st.execute("insert into stir.reference_definition values ('" + orphanId + "','" + tenant + "','" + UUID.randomUUID() +
+                "','" + UUID.randomUUID() + "','orphan-name','scope','{}','1','unit','ref','" + UUID.randomUUID() + "',now())");
+            st.execute("set session_replication_role = default");
+        }
+        var health = new HealthServer();
+        var loop = new VerifierLoop(config, health);
+        var criticalLinesForThisIncident = new ArrayList<String>();
+        java.io.PrintStream original = System.out;
+        try {
+            var captured = new java.io.ByteArrayOutputStream();
+            System.setOut(new java.io.PrintStream(captured));
+            for (int cycle = 0; cycle < 4; cycle++) {
+                try (AuditSql sql = new AuditSql(config)) {
+                    loop.runOneIncrementalPassForTest(sql);
+                    health.setOpenIncidentCount(sql.countIncidents());
+                }
+            }
+            System.out.flush();
+            for (String line : captured.toString().split("\\R")) {
+                if (line.contains("CRITICAL") && line.contains(orphanId.toString())) criticalLinesForThisIncident.add(line);
+            }
+        } finally {
+            System.setOut(original);
+        }
+        assertEquals(1, criticalLinesForThisIncident.size(),
+            "4 cycles rediscovering the SAME persistent incident must emit exactly ONE CRITICAL log line: " + criticalLinesForThisIncident);
+        assertTrue(health.openIncidentCount() >= 1, "health must keep reporting the incident as open across cycles even though no new CRITICAL fired for it");
+    }
+
+    /** P1-RA-002 "after commit" fault-injection boundary (item 5, second reaudit): the OTHER half of
+     * the atomicity guarantee failureMidTransactionLeavesNoPartialVerdictOrIncident already proves -
+     * once recordVerdictAtomically's transaction genuinely commits, BOTH the verdict AND the
+     * incident must be present together, never one without the other. */
+    @Test void successfulTransactionLeavesBothVerdictAndIncidentPersistedTogether() throws Exception {
+        UUID tenant = UUID.randomUUID();
+        try (Connection c = admin()) {
+            AuditTestSupport.asIdaxApp(c, tenant, () -> {
+                try (Statement st = c.createStatement()) {
+                    st.execute("insert into stir.market_constitution (id, tenant_id, community_id, authority_id, version, canonical_json, digest_sha256, activated_at) " +
+                        "values (gen_random_uuid(), '" + tenant + "', gen_random_uuid(), gen_random_uuid(), 999999, '{}', 'after-commit-test', now())");
+                } catch (SQLException e) { throw new RuntimeException(e); }
+            });
+        }
+        try (AuditSql sql = new AuditSql(config)) {
+            var event = sql.fetchUnverifiedEvents(DomainRuleEngine.RULE_VERSION, 500).stream()
+                .filter(e -> tenant.equals(e.tenantId())).findFirst().orElseThrow();
+            var incident = new AuditSql.IncidentToRecord(tenant, event.domain(), event.auditEventId(), "TEST_AFTER_COMMIT", "{\"x\":1}", "after-commit-" + event.auditEventId());
+            boolean isNew = sql.recordVerdictAtomically(event.auditEventId(), "after-commit-rule-v1", VerificationVerdict.VIOLATION, "test", incident, null);
+            assertTrue(isNew, "a genuinely new incident must report isNew=true");
+            assertTrue(sql.hasVerificationResult(event.auditEventId(), "after-commit-rule-v1"), "after a successful commit, the verdict must be present");
+            long incidentCount = sql.queryLong("select count(*) from stir_audit.security_incident where audit_event_id = ?::uuid", event.auditEventId().toString());
+            assertEquals(1, incidentCount, "after a successful commit, the incident must be present too - both, never one without the other");
+        }
+    }
 }

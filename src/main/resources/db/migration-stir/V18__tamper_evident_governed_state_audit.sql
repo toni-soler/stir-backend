@@ -70,6 +70,50 @@ GRANT SELECT ON TABLE stir_audit.coverage_registry TO stir_auditor;
 -- writes it. idax_app/idax_admin/idax_backend get no GRANT at all, so ownership alone is the
 -- write boundary; nothing here depends on RLS to stop them.
 
+-- ===== activation_marker / baseline_import: P1-R2-002 (second Codex reaudit) moved these here
+-- from what was originally a separate V19, specifically so table baseline capture and this table's
+-- own trigger activation happen inside ONE migration transaction, with the LOCK TABLE this DO block
+-- takes below (see "activation ceremony" comment further down) closing the window an ordinary
+-- idax_app writer could otherwise land in between "trigger not yet active" and "baseline captured".
+-- V18/V19 were never published/deployed anywhere before this change - see this commit's message and
+-- `git log -p` on this file for the exact before/after Codex asked for, rather than a parallel V20.
+--
+-- SEMANTICS, STATED EXPLICITLY (Codex's second reaudit: the first round's language overclaimed):
+-- a `baseline_import` row means ONLY "this (table, key) was present in stir.* at the moment this
+-- activation ceremony captured it" - it is NOT evidence of legitimate origin, authorization, or
+-- audited history. The row's creation was never itself observed by this audit trail. Equivalent
+-- explicit semantics: LEGACY_UNVERIFIED. Never read/write/log/document this as VALID, AUTHORIZED,
+-- or AUDITED - a row can be in baseline_import precisely because nothing ever verified it.
+-- `postgres`/DB owner/host root remain entirely outside Phase 1's runtime trust boundary: an owner
+-- who disables a trigger and inserts a row before this ceremony runs produces a row this migration
+-- cannot distinguish from genuine pre-activation legacy data. Phase 1 defends against idax_app/
+-- idax_admin/idax_backend (the runtime credential surface), never against the database owner - see
+-- GOVERNED_STATE_AUDIT_ARCHITECTURE.md's own trust boundary statement.
+CREATE TABLE stir_audit.activation_marker (
+  activation_batch  uuid PRIMARY KEY,
+  activated_at       timestamptz NOT NULL DEFAULT now(),
+  migration_version  text NOT NULL
+);
+REVOKE ALL ON TABLE stir_audit.activation_marker FROM PUBLIC;
+GRANT SELECT ON TABLE stir_audit.activation_marker TO stir_auditor;
+-- Durable, queryable record of exactly when "audit protection active" became true for a given
+-- activation ceremony - the boundary marker the operational ceremony diagram (see V18's DO block
+-- below and VALIDATION_GOVERNED_STATE_AUDIT_MVP.md) refers to as "establish audit activation
+-- marker". One row per ceremony; Phase 1 populates exactly one (this migration's own run).
+
+CREATE TABLE stir_audit.baseline_import (
+  table_oid             oid NOT NULL,
+  entity_key_canonical  text NOT NULL,
+  tenant_id             uuid,                 -- best-effort, for observability/filtering only
+  imported_at           timestamptz NOT NULL DEFAULT now(),
+  import_batch          uuid NOT NULL REFERENCES stir_audit.activation_marker(activation_batch),
+  PRIMARY KEY (table_oid, entity_key_canonical)
+);
+REVOKE ALL ON TABLE stir_audit.baseline_import FROM PUBLIC;
+GRANT SELECT ON TABLE stir_audit.baseline_import TO stir_auditor;
+-- No RLS, same reasoning as coverage_registry: migrator-only writer, schema metadata rather than
+-- tenant business data, read cross-tenant by the auditor by design.
+
 -- ===== stream_head: one row per (tenant, domain), the serialization point for that stream. =====
 CREATE TABLE stir_audit.stream_head (
   tenant_id   uuid NOT NULL,
@@ -441,7 +485,19 @@ DECLARE
   v_domain text;
   v_pk_columns text[];
   v_justification text;
+  -- P1-R2-002 activation ceremony: one batch id ties every baseline_import row created by this
+  -- migration run to exactly one activation_marker row, inserted FIRST (baseline_import.import_batch
+  -- has a real FK to activation_marker.activation_batch) - the operational ceremony diagram in
+  -- VALIDATION_GOVERNED_STATE_AUDIT_MVP.md describes "capture baseline" as conceptually preceding
+  -- "establish activation marker", but within this one already-atomic migration transaction nothing
+  -- outside it can observe either statement until BOTH commit together, so the FK's own ordering
+  -- requirement (marker row must exist first) changes nothing about the guarantee actually being
+  -- documented; enforcing the FK is worth more than a diagram-literal statement order.
+  v_activation_batch uuid := gen_random_uuid();
+  v_baseline_count bigint;
 BEGIN
+  INSERT INTO stir_audit.activation_marker (activation_batch, migration_version) VALUES (v_activation_batch, 'V18');
+
   FOR r IN
     SELECT c.oid AS table_oid, c.relname AS table_name
     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -460,21 +516,55 @@ BEGIN
       INSERT INTO stir_audit.coverage_registry (table_oid, schema_name, table_name, domain, pk_columns, coverage_status, justification, digest_profile_version)
         VALUES (r.table_oid, 'stir', r.table_name, v_domain, v_pk_columns, 'COVERED',
           'Governed state per GOVERNED_STATE_AUDIT_ARCHITECTURE.md domain classification.', 'PG17_JSONB_TEXT_SHA256_V1');
+
+      -- ===== P1-R2-002 activation ceremony, per-table, INSIDE this migration's own transaction:
+      -- LOCK this table ACCESS EXCLUSIVE FIRST (before reading a single row of it), capture its
+      -- baseline snapshot next, and only THEN create the trigger. PostgreSQL holds an ACCESS
+      -- EXCLUSIVE lock until this whole migration transaction commits or rolls back - so from the
+      -- instant this LOCK statement returns, no session (including idax_app) can INSERT/UPDATE/
+      -- DELETE this table until the entire V18 migration finishes, meaning there is no statement-
+      -- level gap in which an ordinary runtime write could land between "baseline captured" and
+      -- "trigger active" for this table. This is what closes the "quiesce application writers"
+      -- ceremony step technically, for the ordinary-writer threat model, rather than only as an
+      -- operational runbook instruction: a superuser bypassing this lock (e.g. via a second
+      -- superuser session force-disabling the trigger afterward) remains explicitly outside Phase
+      -- 1's trust boundary, per P1-R2-002 - this migration does not and cannot defend against that. =====
+      EXECUTE format('LOCK TABLE stir.%I IN ACCESS EXCLUSIVE MODE', r.table_name);
+      EXECUTE format($f$
+        INSERT INTO stir_audit.baseline_import (table_oid, entity_key_canonical, tenant_id, import_batch)
+        SELECT %L::oid,
+               (SELECT string_agg(u.col || '=' || COALESCE(to_jsonb(t)::jsonb ->> u.col, E'\\N'), ';' ORDER BY u.ord)
+                  FROM unnest(%L::text[]) WITH ORDINALITY AS u(col, ord)),
+               NULLIF(to_jsonb(t)::jsonb ->> 'tenant_id', '')::uuid,
+               %L::uuid
+        FROM stir.%I t
+        ON CONFLICT (table_oid, entity_key_canonical) DO NOTHING
+      $f$, r.table_oid, v_pk_columns, v_activation_batch, r.table_name);
+      GET DIAGNOSTICS v_baseline_count = ROW_COUNT;
+      RAISE NOTICE 'stir_audit: activation ceremony captured % LEGACY_UNVERIFIED baseline rows for stir.% before activating its trigger', v_baseline_count, r.table_name;
+
       EXECUTE format('CREATE TRIGGER audit_emit_mutation_event AFTER INSERT OR UPDATE OR DELETE ON stir.%I FOR EACH ROW EXECUTE FUNCTION stir_audit.emit_mutation_event()', r.table_name);
     ELSIF v_excluded ? r.table_name THEN
       v_justification := v_excluded ->> r.table_name;
       INSERT INTO stir_audit.coverage_registry (table_oid, schema_name, table_name, coverage_status, justification)
         VALUES (r.table_oid, 'stir', r.table_name, 'EXCLUDED_JUSTIFIED', v_justification);
-    ELSIF NOT has_table_privilege('idax_app', format('stir.%I', r.table_name), 'INSERT') THEN
-      -- category/resource_kind today: no runtime role can ever mutate them, so no trigger is
-      -- meaningful; re-verified live rather than hardcoded by name, so a future table that also
-      -- happens to have no idax_app INSERT still classifies correctly without a migration edit.
+    ELSIF NOT (has_table_privilege('idax_app', format('stir.%I', r.table_name), 'INSERT')
+            OR has_table_privilege('idax_app', format('stir.%I', r.table_name), 'UPDATE')
+            OR has_table_privilege('idax_app', format('stir.%I', r.table_name), 'DELETE')) THEN
+      -- category/resource_kind today: no runtime role can ever mutate them via ANY of INSERT,
+      -- UPDATE or DELETE, so no trigger is meaningful; re-verified live rather than hardcoded by
+      -- name, so a future table that also happens to have no idax_app DML still classifies
+      -- correctly without a migration edit. Checking all three verbs (not just INSERT) here directly
+      -- is P1-RA-006's own re-verification, done once at classification time; V19 additionally
+      -- re-checks this invariant against the schema as it stands after upgrade.
       INSERT INTO stir_audit.coverage_registry (table_oid, schema_name, table_name, coverage_status, justification)
-        VALUES (r.table_oid, 'stir', r.table_name, 'NO_PRIVILEGE_CATALOG', 'idax_app has no INSERT privilege on this table today - verified live via has_table_privilege at migration time, not assumed.');
+        VALUES (r.table_oid, 'stir', r.table_name, 'NO_PRIVILEGE_CATALOG', 'idax_app has no INSERT, UPDATE or DELETE privilege on this table today - verified live via has_table_privilege at migration time, not assumed.');
     ELSE
       RAISE EXCEPTION 'stir_audit: table stir.% is new, has an unclassified sensitive privilege surface, and is neither COVERED nor EXCLUDED_JUSTIFIED nor a no-privilege catalog - classify it explicitly in V18 (or a later additive migration) before this can proceed. This is the fail-closed CI gate CLAUDE_GOVERNED_STATE_AUDIT_ORDERS.md #3 requires.', r.table_name;
     END IF;
   END LOOP;
+
+  RAISE NOTICE 'stir_audit: activation ceremony complete, activation_batch=%', v_activation_batch;
 END $do_registry$;
 
 -- ===== stir_auditor's cross-tenant read of covered STIR tables (GOVERNED_STATE_AUDIT_ARCHITECTURE.md:
