@@ -589,4 +589,3 @@ BEGIN
     EXECUTE format('CREATE POLICY stir_auditor_cross_tenant_read ON stir.%I FOR SELECT TO stir_auditor USING (true)', r.table_name);
   END LOOP;
 END $do_auditor_reads$;
-
