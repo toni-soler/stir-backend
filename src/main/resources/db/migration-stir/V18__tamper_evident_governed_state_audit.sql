@@ -44,7 +44,26 @@ GRANT USAGE ON SCHEMA stir_audit TO stir_auditor;
 -- idax_app/idax_admin/idax_backend get no USAGE - even if they somehow had SELECT on a stir_audit
 -- object, they could never even qualify a name to reach it without schema USAGE.
 
-CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA stir_audit;
+-- INT-P1-001 remediation (found by the isolated full-stack integration gate, never by
+-- Testcontainers - see INTEGRATION_GOVERNED_STATE_AUDIT_PHASE1.md): this migration used to
+-- `CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA stir_audit` and call pgcrypto's
+-- `digest(bytea, 'sha256')` for every hash below. In the real STIR stack, `idax-core-runtime`'s own
+-- migrations already install `pgcrypto` - into `idax_core`, before this migration ever runs -
+-- `CREATE EXTENSION IF NOT EXISTS` then silently no-ops (an extension is unique per DATABASE, not
+-- per requested schema) and the audit's own `search_path = pg_catalog[, stir_audit]` never included
+-- `idax_core`, so the bare `digest(...)` call failed to resolve at all. STIR audit code must never
+-- need to know which schema another product's migrations happened to install an extension into.
+-- The fix: PostgreSQL 17 (in fact since PG11) ships `pg_catalog.sha256(bytea) returns bytea`
+-- natively - no extension of any kind required for this. pgcrypto's `digest(..., 'sha256')` was
+-- the ONLY pgcrypto function this schema ever called (grep confirms: no gen_random_bytes/hmac/
+-- encrypt/decrypt/crypt/gen_salt/pgp_* anywhere in V18/V19; `gen_random_uuid()` used elsewhere in
+-- this file is itself a native pg_catalog function since PG13, never pgcrypto's). Every `digest(x,
+-- 'sha256')` call below is now `sha256(x)` instead, and the `CREATE EXTENSION` statement is gone -
+-- this audit no longer touches, depends on, or needs to know anything about `idax_core`'s own
+-- extension. Byte-for-byte hash equivalence with the old pgcrypto-backed digest is verified
+-- directly against real vectors (see this migration's own regression test added alongside this
+-- fix, and INTEGRATION_GOVERNED_STATE_AUDIT_PHASE1.md) - no stored hash's meaning changes, no
+-- `event_format_version` changes, no domain separator changes.
 
 SET ROLE stir_audit_owner;
 
@@ -280,9 +299,8 @@ $$;
 -- H[0] per stream: fixed, deterministic, never stored bytes from elsewhere.
 CREATE OR REPLACE FUNCTION stir_audit.genesis_hash(p_tenant uuid, p_domain text) RETURNS bytea
 LANGUAGE sql IMMUTABLE SET search_path = pg_catalog, stir_audit AS $$
-  SELECT digest(
-    convert_to('STIR-AUDIT-GENESIS-V1', 'UTF8') || stir_audit.lp_text(p_tenant::text) || stir_audit.lp_text(p_domain),
-    'sha256')
+  SELECT sha256(
+    convert_to('STIR-AUDIT-GENESIS-V1', 'UTF8') || stir_audit.lp_text(p_tenant::text) || stir_audit.lp_text(p_domain))
 $$;
 
 -- The row digest profile PG17_JSONB_TEXT_SHA256_V1: sha256(to_jsonb(row)::text) computed by
@@ -290,7 +308,7 @@ $$;
 -- exposed as its own function purely so a test can assert the profile name/behavior directly.
 CREATE OR REPLACE FUNCTION stir_audit.row_digest_pg17_jsonb_text_sha256_v1(p_row jsonb) RETURNS bytea
 LANGUAGE sql IMMUTABLE SET search_path = pg_catalog, stir_audit AS $$
-  SELECT digest(convert_to(p_row::text, 'UTF8'), 'sha256')
+  SELECT sha256(convert_to(p_row::text, 'UTF8'))
 $$;
 
 -- H[n] = SHA256( "STIR-AUDIT-EVENT-V1" || H[n-1] || U64(sequence) || LP(tenant_id) || LP(domain)
@@ -304,7 +322,7 @@ CREATE OR REPLACE FUNCTION stir_audit.compute_event_hash(
   p_session_user_name text, p_community_id uuid
 ) RETURNS bytea
 LANGUAGE sql IMMUTABLE SET search_path = pg_catalog, stir_audit AS $$
-  SELECT digest(
+  SELECT sha256(
       convert_to('STIR-AUDIT-EVENT-V1', 'UTF8')
       || p_previous_hash
       || int8send(p_sequence)
@@ -318,8 +336,7 @@ LANGUAGE sql IMMUTABLE SET search_path = pg_catalog, stir_audit AS $$
       || stir_audit.nullable_lp_bytes(p_new_row_digest)
       || stir_audit.lp_text(p_row_digest_profile)
       || stir_audit.lp_text(p_session_user_name)
-      || stir_audit.nullable_lp_text(p_community_id::text),
-      'sha256')
+      || stir_audit.nullable_lp_text(p_community_id::text))
 $$;
 
 REVOKE EXECUTE ON FUNCTION stir_audit.lp_bytes(bytea) FROM PUBLIC;

@@ -91,7 +91,11 @@ CREATE OR REPLACE FUNCTION stir_audit.compute_event_hash_v2(
   p_community_id uuid
 ) RETURNS bytea
 LANGUAGE sql IMMUTABLE SET search_path = pg_catalog, stir_audit AS $$
-  SELECT digest(
+  -- INT-P1-001 remediation: native pg_catalog.sha256(bytea), not pgcrypto's digest(..,'sha256') -
+  -- see V18's own comment (right after the schema/pgcrypto section) for the full root cause. Byte-
+  -- for-byte equivalent output; nothing about this hash's domain separator, field order, or
+  -- canonicalization changed.
+  SELECT sha256(
       convert_to('STIR-AUDIT-EVENT-V2', 'UTF8')
       || p_previous_hash
       || int8send(p_sequence)
@@ -116,8 +120,7 @@ LANGUAGE sql IMMUTABLE SET search_path = pg_catalog, stir_audit AS $$
       || stir_audit.lp_text(p_db_time_text)
       || stir_audit.lp_text(p_txid_text)
       || stir_audit.lp_text(p_event_format_version)
-      || stir_audit.nullable_lp_text(p_community_id::text),
-      'sha256')
+      || stir_audit.nullable_lp_text(p_community_id::text))
 $$;
 REVOKE EXECUTE ON FUNCTION stir_audit.compute_event_hash_v2(bytea,bigint,uuid,uuid,text,oid,text,text,text,bytea,bytea,text,text,text,text,text,text,text,text,text,text,text,text,uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION stir_audit.compute_event_hash_v2(bytea,bigint,uuid,uuid,text,oid,text,text,text,bytea,bytea,text,text,text,text,text,text,text,text,text,text,text,text,uuid) TO stir_auditor;

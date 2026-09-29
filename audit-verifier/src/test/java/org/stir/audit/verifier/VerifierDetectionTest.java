@@ -1266,4 +1266,85 @@ class VerifierDetectionTest {
             assertEquals(1, incidentCount, "after a successful commit, the incident must be present too - both, never one without the other");
         }
     }
+
+    /** INT-P1-001 (isolated full-stack integration gate finding, not caught by any Testcontainers
+     * run in five prior reaudit rounds): the real STIR stack always has idax-core-runtime's own
+     * migrations install `pgcrypto` - into `idax_core`, never `stir_audit` - BEFORE stir's own
+     * V1-V19 ever run. The OLD, pgcrypto-`digest()`-based V18/V19 failed outright in exactly this
+     * ordering with "function digest(bytea, unknown) does not exist", because
+     * `CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA stir_audit` silently no-ops when the
+     * extension already exists ANYWHERE in the database (extensions are per-database, not
+     * per-schema), and V18/V19's own `search_path` never included `idax_core`. Reproduces that real
+     * precondition directly - a schema named idax_core with pgcrypto installed into it, created
+     * BEFORE stir's own migrations run - without needing the real idax-core-runtime migration set. */
+    @Test void migratesCleanlyWhenPgcryptoAlreadyInstalledInAnotherSchemaFirst() throws Exception {
+        try (PostgreSQLContainer<?> freshPg = AuditTestSupport.newPostgres()) {
+            freshPg.start();
+            try (Connection c = DriverManager.getConnection(freshPg.getJdbcUrl(), freshPg.getUsername(), freshPg.getPassword());
+                 Statement st = c.createStatement()) {
+                st.execute("create role idax_app; create role idax_admin; create role idax_backend login password 'x' inherit; grant idax_app, idax_admin to idax_backend");
+                // Exactly what idax-core-runtime's own migrations do in the real stack, before STIR's
+                // own migrations ever run - a DIFFERENT product installing pgcrypto into ITS OWN schema.
+                st.execute("create schema idax_core");
+                st.execute("create extension pgcrypto with schema idax_core");
+            }
+            Flyway.configure().dataSource(freshPg.getJdbcUrl(), freshPg.getUsername(), freshPg.getPassword())
+                .schemas("stir").locations("filesystem:../src/main/resources/db/migration-stir").load().migrate();
+
+            try (Connection c = DriverManager.getConnection(freshPg.getJdbcUrl(), freshPg.getUsername(), freshPg.getPassword());
+                 Statement st = c.createStatement()) {
+                try (var rs = st.executeQuery("select version, success from stir.flyway_schema_history order by installed_rank desc limit 1")) {
+                    assertTrue(rs.next());
+                    assertEquals("19", rs.getString("version"), "stir's migrations must reach V19 even with pgcrypto pre-installed elsewhere");
+                    assertTrue(rs.getBoolean("success"));
+                }
+                // stir_audit never installed its own pgcrypto - confirms the fix actually removed
+                // the dependency, not just tolerated a pre-existing one it happens not to need.
+                try (var rs = st.executeQuery("select count(*) from pg_extension where extname = 'pgcrypto' and extnamespace = 'idax_core'::regnamespace")) {
+                    rs.next();
+                    assertEquals(1, rs.getLong(1), "pgcrypto must remain exactly where the OTHER product installed it - stir_audit never touches or duplicates it");
+                }
+                // The hash chain itself must actually work end-to-end in this exact ordering, not
+                // just "migration didn't error" - insert a real governed mutation and verify it.
+                UUID tenant = UUID.randomUUID();
+                AuditTestSupport.asIdaxApp(c, tenant, () -> {
+                    try (Statement st2 = c.createStatement()) {
+                        st2.execute("insert into stir.market_constitution (id, tenant_id, community_id, authority_id, version, canonical_json, digest_sha256, activated_at) " +
+                            "values (gen_random_uuid(), '" + tenant + "', gen_random_uuid(), gen_random_uuid(), 1, '{}', 'idax-core-first-test', now())");
+                    } catch (SQLException e) { throw new RuntimeException(e); }
+                });
+                try (var rs = st.executeQuery("select count(*) from stir_audit.mutation_event where tenant_id = '" + tenant + "'")) {
+                    rs.next();
+                    assertEquals(1, rs.getLong(1), "the hash chain itself must actually produce a real audit event in this exact idax-core-first ordering, not just avoid a migration error");
+                }
+            }
+        }
+    }
+
+    /** The inverse control: STIR's own migrations must never install `pgcrypto` themselves - if
+     * they did, this would only be masking a real dependency, not removing it. */
+    @Test void migratesCleanlyWithNoPgcryptoExtensionAnywhere() throws Exception {
+        try (PostgreSQLContainer<?> freshPg = AuditTestSupport.newPostgres()) {
+            freshPg.start();
+            try (Connection c = DriverManager.getConnection(freshPg.getJdbcUrl(), freshPg.getUsername(), freshPg.getPassword());
+                 Statement st = c.createStatement()) {
+                st.execute("create role idax_app; create role idax_admin; create role idax_backend login password 'x' inherit; grant idax_app, idax_admin to idax_backend");
+            }
+            Flyway.configure().dataSource(freshPg.getJdbcUrl(), freshPg.getUsername(), freshPg.getPassword())
+                .schemas("stir").locations("filesystem:../src/main/resources/db/migration-stir").load().migrate();
+
+            try (Connection c = DriverManager.getConnection(freshPg.getJdbcUrl(), freshPg.getUsername(), freshPg.getPassword());
+                 Statement st = c.createStatement()) {
+                try (var rs = st.executeQuery("select version, success from stir.flyway_schema_history order by installed_rank desc limit 1")) {
+                    assertTrue(rs.next());
+                    assertEquals("19", rs.getString("version"));
+                    assertTrue(rs.getBoolean("success"));
+                }
+                try (var rs = st.executeQuery("select count(*) from pg_extension where extname = 'pgcrypto'")) {
+                    rs.next();
+                    assertEquals(0, rs.getLong(1), "stir's own migrations must never install pgcrypto themselves - confirms the audit hash functions are genuinely extension-free");
+                }
+            }
+        }
+    }
 }
