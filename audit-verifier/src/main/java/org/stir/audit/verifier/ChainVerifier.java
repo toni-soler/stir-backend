@@ -58,4 +58,49 @@ public final class ChainVerifier {
         }
         return new Ok();
     }
+
+    /** P1-RA-007: the periodic full-reconciliation result. `verifiedThroughSequence`/`verifiedHead`
+     * are the last link this call actually confirmed - the caller (VerifierLoop's periodic pass)
+     * persists them as the new stir_audit.chain_reconciliation_checkpoint only when the walk
+     * reached the live stream_head cleanly, so a broken stream never advances its own checkpoint
+     * past the break (the same break would otherwise go undetected on every later cycle). */
+    record ReconciliationOutcome(Result result, long verifiedThroughSequence, byte[] verifiedHead) {}
+
+    /** Walks from `fromSequenceInclusive` through the CURRENT live stream_head (not just however
+     * many event rows exist), and additionally confirms the last walked event's current_hash still
+     * equals the live stream_head.head_hash - catching a head tampered independently of any single
+     * event row, or an event silently inserted/re-pointed without going through the trigger. */
+    ReconciliationOutcome reconcileStreamFrom(UUID tenant, String domain, long fromSequenceInclusive) throws java.sql.SQLException {
+        var liveHead = sql.currentStreamHead(tenant, domain);
+        long liveSequence = liveHead.getKey();
+        byte[] liveHash = liveHead.getValue();
+
+        List<MutationEvent> events = sql.fetchStreamFrom(tenant, domain, Math.max(1, fromSequenceInclusive - 1));
+        MutationEvent previous = events.isEmpty() ? null : (fromSequenceInclusive <= 1 ? null : events.get(0));
+        int startIdx = (fromSequenceInclusive <= 1) ? 0 : 1;
+        long verifiedThrough = fromSequenceInclusive - 1;
+        byte[] verifiedHead = (fromSequenceInclusive <= 1) ? null : (previous != null ? previous.currentHash() : null);
+
+        for (int i = startIdx; i < events.size(); i++) {
+            MutationEvent current = events.get(i);
+            Result r = verifyLink(current, previous);
+            if (r instanceof Broken) return new ReconciliationOutcome(r, verifiedThrough, verifiedHead);
+            verifiedThrough = current.sequence();
+            verifiedHead = current.currentHash();
+            previous = current;
+        }
+
+        if (verifiedThrough != liveSequence) {
+            return new ReconciliationOutcome(
+                new Broken("EXPECTED_EVENT_MISSING", "walked through sequence " + verifiedThrough +
+                    " but stream_head reports sequence " + liveSequence + " - an event this stream's head claims to have is not observable (deleted, or head advanced without a corresponding event row)"),
+                verifiedThrough, verifiedHead);
+        }
+        if (verifiedHead != null && !Arrays.equals(verifiedHead, liveHash)) {
+            return new ReconciliationOutcome(
+                new Broken("STREAM_HEAD_MISMATCH", "last walked event's current_hash does not equal stream_head.head_hash for this stream - the head was altered independently of its events"),
+                verifiedThrough, verifiedHead);
+        }
+        return new ReconciliationOutcome(new Ok(), verifiedThrough, verifiedHead);
+    }
 }

@@ -1,27 +1,30 @@
 package org.stir.audit.verifier;
 
 import java.sql.SQLException;
-import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.stir.audit.verifier.domain.DomainRule;
 
-/** Durable polling loop with LISTEN/NOTIFY as a latency optimization only (NOTIFY is not a durable
- * queue - GOVERNED_STATE_AUDIT_ARCHITECTURE.md is explicit about this). Every cycle: fetch new
- * events since the durable cursor, verify chain + domain rule per event, persist an idempotent
- * verdict, report VIOLATION incidents, advance the cursor only after all of that succeeds. A crash
- * mid-cycle simply re-processes the same batch next time - verification_result's own
- * (audit_event_id, verifier_rule_version) primary key with ON CONFLICT DO UPDATE makes that safe,
- * and re-reporting the same incident reason for the same event is idempotent by construction
- * (security_incident rows are evidence, not a dedup key - a genuine re-detection after a crash is
- * expected to look identical, and this loop does not insert a second incident row for an event it
- * already reported once in this same batch, tracked in-memory for that single cycle only). */
+/** Durable polling loop. Two DELIBERATELY separate passes per cycle, matching
+ * CLAUDE_GOVERNED_STATE_AUDIT_ORDERS.md's remediation instructions:
+ *   1. Incremental event processing (fetchUnverifiedEvents - P1-RA-001: an anti-join against
+ *      verification_result, never a time/UUID watermark, so a late-committing transaction is
+ *      picked up on the very next cycle regardless of what any other stream did meanwhile).
+ *   2. Periodic FULL chain reconciliation (every PERIODIC_RECONCILE_EVERY_N_CYCLES cycles -
+ *      P1-RA-007: re-walks each stream from its own durable checkpoint through the live
+ *      stream_head, catching historical tampering the incremental pass has already scrolled past).
+ * verdict+incident+cursor-advance is one atomic transaction (P1-RA-002): a crash at any point
+ * leaves nothing partially persisted, and reprocessing an already-fully-persisted event is a
+ * cheap no-op (hasVerificationResult skip) rather than a correctness requirement. */
 final class VerifierLoop {
     private final Config config;
     private final String ruleVersion;
     private final HealthServer health;
     private final AtomicBoolean running = new AtomicBoolean(true);
+    private long cycleCount = 0;
+    private static final int PERIODIC_RECONCILE_EVERY_N_CYCLES = 10;
 
     VerifierLoop(Config config, HealthServer health) {
         this.config = config;
@@ -34,8 +37,10 @@ final class VerifierLoop {
     void run() {
         while (running.get()) {
             try (var sql = new AuditSql(config)) {
-                sql.listen("stir_audit_mutation"); // best-effort; the trigger does not NOTIFY in Phase 1, reserved for a later latency optimization
-                runCycle(sql);
+                sql.listen("stir_audit_mutation"); // best-effort; the trigger does not NOTIFY in Phase 1
+                runIncrementalPass(sql);
+                cycleCount++;
+                if (cycleCount % PERIODIC_RECONCILE_EVERY_N_CYCLES == 0) runPeriodicChainReconciliation(sql);
                 health.markCycleSuccess();
             } catch (Exception e) {
                 health.markCycleError(e.toString());
@@ -45,32 +50,25 @@ final class VerifierLoop {
         }
     }
 
-    private void runCycle(AuditSql sql) throws SQLException {
+    /** Runs the incremental pass exactly once, synchronously, for tests that need a single
+     * deterministic cycle rather than the sleep-looping run(). */
+    void runOneIncrementalPassForTest(AuditSql sql) throws SQLException { runIncrementalPass(sql); }
+    void runOnePeriodicReconciliationForTest(AuditSql sql) throws SQLException { runPeriodicChainReconciliation(sql); }
+
+    private void runIncrementalPass(AuditSql sql) throws SQLException {
         var engine = new DomainRuleEngine();
         var chain = new ChainVerifier(sql);
-        var incidents = new IncidentReporter(sql, System.out);
-
-        AuditSql.CursorState cursor = sql.readCursor(config.cursorName());
-        OffsetDateTime afterDbTime = cursor.lastDbTime();
-        UUID afterEventId = cursor.lastAuditEventId();
+        int reportedThisCycle = 0;
 
         List<MutationEvent> batch;
-        int reportedThisCycle = 0;
         do {
-            batch = sql.fetchEventsAfter(afterDbTime, afterEventId, 500);
+            batch = sql.fetchUnverifiedEvents(ruleVersion, 500);
             for (MutationEvent event : batch) {
-                if (sql.hasVerificationResult(event.auditEventId(), ruleVersion)) {
-                    afterDbTime = event.dbTime(); afterEventId = event.auditEventId();
-                    continue; // already processed in a prior cycle that crashed before advancing the cursor
-                }
+                MutationEvent predecessor = event.sequence() > 1 ? sql.fetchEventAtOrNull(event.tenantId(), event.domain(), event.sequence() - 1) : null;
+                ChainVerifier.Result chainResult = chain.verifyLink(event, predecessor);
+
                 VerificationVerdict finalVerdict;
                 String reason;
-
-                MutationEvent predecessor = event.sequence() > 1 ? sql.fetchEventAtOrNull(event.tenantId(), event.domain(), event.sequence() - 1) : null;
-                ChainVerifier.Result chainResult;
-                try { chainResult = chain.verifyLink(event, predecessor); }
-                catch (SQLException e) { throw e; }
-
                 if (chainResult instanceof ChainVerifier.Broken broken) {
                     finalVerdict = VerificationVerdict.VIOLATION;
                     reason = "CHAIN_" + broken.reasonCode() + ": " + broken.detail();
@@ -80,26 +78,81 @@ final class VerifierLoop {
                     reason = semantic.reasonCode() + ": " + semantic.detail();
                 }
 
-                sql.upsertVerificationResult(event.auditEventId(), ruleVersion, finalVerdict, reason);
+                AuditSql.IncidentToRecord incident = null;
                 if (finalVerdict == VerificationVerdict.VIOLATION) {
+                    String reasonCode = reason.split(":", 2)[0];
+                    String dedupKey = event.auditEventId() + ":" + ruleVersion + ":" + reasonCode;
                     String evidence = "{\"table\":\"" + event.tableName() + "\",\"operation\":\"" + event.operation() +
-                        "\",\"entityKey\":\"" + event.entityKeyCanonical().replace("\"", "'") + "\",\"reason\":\"" + reason.replace("\"", "'") + "\"}";
-                    incidents.report(event.tenantId(), event.domain(), event.auditEventId(), reason.split(":")[0], evidence);
+                        "\",\"entityKey\":\"" + jsonEscape(event.entityKeyCanonical()) + "\",\"reason\":\"" + jsonEscape(reason) + "\"}";
+                    incident = new AuditSql.IncidentToRecord(event.tenantId(), event.domain(), event.auditEventId(), reasonCode, evidence, dedupKey);
                     reportedThisCycle++;
                 }
-                afterDbTime = event.dbTime(); afterEventId = event.auditEventId();
-                sql.writeCursor(config.cursorName(), afterEventId);
+                // P1-RA-002: verdict + incident + cursor advance, one transaction. A crash at any
+                // point in between leaves nothing committed; fetchUnverifiedEvents finds this exact
+                // event again next cycle since no verification_result row exists for it yet.
+                sql.recordVerdictAtomically(event.auditEventId(), ruleVersion, finalVerdict, reason, incident, config.cursorName());
+                if (incident != null) {
+                    System.out.println("level=CRITICAL component=stir-audit-verifier reason_code=" + incident.reasonCode() +
+                        " tenant_id=" + incident.tenantId() + " domain=" + incident.domain() + " audit_event_id=" + incident.auditEventId() +
+                        " dedup_key=" + incident.dedupKey() + " evidence=" + incident.evidenceJson());
+                    System.out.flush();
+                }
             }
         } while (batch.size() == 500);
 
-        // Full reconciliation is comparatively expensive (a live-row scan per covered table), so it
-        // runs once per cycle rather than per event, after the incremental pass above.
+        // Reconciler stays a per-cycle pass (cheap relative to a full chain re-hash): it only
+        // compares row existence against mutation_event's own claims, not per-link hash math.
         var reconciler = new Reconciler(sql);
         for (Reconciler.Finding finding : reconciler.reconcileAll()) {
+            String dedupKey = "RECONCILE:" + finding.tableOid() + ":" + finding.entityKeyCanonical() + ":" + finding.reasonCode();
             String evidence = "{\"table\":\"" + finding.tableName() + "\",\"entityKey\":\"" +
-                finding.entityKeyCanonical().replace("\"", "'") + "\",\"detail\":\"" + finding.detail().replace("\"", "'") + "\"}";
-            incidents.report(null, null, null, finding.reasonCode(), evidence);
+                jsonEscape(finding.entityKeyCanonical()) + "\",\"detail\":\"" + jsonEscape(finding.detail()) + "\"}";
+            var incident = new AuditSql.IncidentToRecord(null, null, null, finding.reasonCode(), evidence, dedupKey);
+            sql.recordIncidentOnly(incident);
+            System.out.println("level=CRITICAL component=stir-audit-verifier reason_code=" + finding.reasonCode() +
+                " table=" + finding.tableName() + " dedup_key=" + dedupKey + " evidence=" + evidence);
+            System.out.flush();
         }
         if (reportedThisCycle > 0) System.out.println("level=INFO component=stir-audit-verifier cycle_violations=" + reportedThisCycle);
     }
+
+    /** P1-RA-007: re-walks each stream from GENESIS (sequence 1) through the live stream_head on
+     * every periodic pass - deliberately NOT resumed from the durable checkpoint. Resuming from
+     * checkpoint+1 was the first draft of this fix and was wrong: reconcileStreamFrom only
+     * re-fetches the checkpoint's own boundary event fresh from the DB, so a tamper to an INTERIOR
+     * already-checkpointed event (neither the checkpoint boundary nor the live head) would never be
+     * re-examined by any later pass once the checkpoint had advanced past it - silently reopening
+     * exactly the gap P1-RA-007 exists to close. A full genesis walk costs O(chain length) per
+     * periodic pass (see VALIDATION_GOVERNED_STATE_AUDIT_MVP.md's performance section for the
+     * measured cost and the documented Phase-2-scale tradeoff); the checkpoint table itself is now
+     * pure observability/bookkeeping ("last sequence a full walk verified clean through as of
+     * last_run_at"), never a resume point that skips re-verifying historical links. A clean walk
+     * advances the checkpoint; a broken one does not (so the same break is re-detected, and
+     * re-deduplicated by dedup_key, on every later periodic pass until a human resolves it per
+     * AUDIT_RUNBOOK.md - no auto-correction). */
+    private void runPeriodicChainReconciliation(AuditSql sql) throws SQLException {
+        var chain = new ChainVerifier(sql);
+        for (Map.Entry<UUID, String> stream : sql.allStreams()) {
+            UUID tenant = stream.getKey();
+            String domain = stream.getValue();
+            var checkpoint = sql.readChainCheckpoint(tenant, domain);
+            var outcome = chain.reconcileStreamFrom(tenant, domain, 1);
+
+            if (outcome.result() instanceof ChainVerifier.Broken broken) {
+                String dedupKey = tenant + ":" + domain + ":CHAIN_RECONCILE:" + broken.reasonCode() + ":" + (outcome.verifiedThroughSequence() + 1);
+                String evidence = "{\"tenant\":\"" + tenant + "\",\"domain\":\"" + domain + "\",\"detail\":\"" + jsonEscape(broken.detail()) + "\"}";
+                var incident = new AuditSql.IncidentToRecord(tenant, domain, null, "CHAIN_RECONCILE_" + broken.reasonCode(), evidence, dedupKey);
+                // Do NOT advance the checkpoint past a break - the same gap must be re-detected
+                // (and re-deduplicated) on every later cycle until resolved.
+                sql.recordChainIncidentAtomically(incident, tenant, domain, checkpoint.lastVerifiedSequence(), checkpoint.lastVerifiedHead());
+                System.out.println("level=CRITICAL component=stir-audit-verifier reason_code=CHAIN_RECONCILE_" + broken.reasonCode() +
+                    " tenant_id=" + tenant + " domain=" + domain + " dedup_key=" + dedupKey + " evidence=" + evidence);
+                System.out.flush();
+            } else {
+                sql.recordChainIncidentAtomically(null, tenant, domain, outcome.verifiedThroughSequence(), outcome.verifiedHead());
+            }
+        }
+    }
+
+    private static String jsonEscape(String s) { return s == null ? "" : s.replace("\\", "\\\\").replace("\"", "\\\""); }
 }

@@ -6,8 +6,15 @@ import java.util.*;
 
 /** Every method here runs as stir_auditor - never idax_app. Recomputation of hashes/digests calls
  * the SAME stir_audit.* SQL functions the trigger itself calls (GRANTed EXECUTE to stir_auditor
- * specifically for this purpose in V18), so there is exactly one implementation of the canonical
- * byte format in this whole system, not two that could silently drift. */
+ * specifically for this purpose in V18/V19), so there is exactly one implementation of each
+ * canonical byte format in this whole system, not two that could silently drift.
+ *
+ * P1-RA-001 remediation: there is no time/UUID-based "watermark" anywhere in this class. The
+ * incremental query (fetchUnverifiedEvents) is a durable anti-join against verification_result -
+ * "has this specific event been verified for this rule version yet" - which is correct regardless
+ * of commit order, transaction duration, or how late a transaction commits relative to others.
+ * stir_audit.verifier_cursor still exists (see VerifierLoop) purely as an observability/latency
+ * hint, never as the completeness mechanism. */
 public final class AuditSql implements AutoCloseable {
     private final Connection connection;
 
@@ -32,78 +39,65 @@ public final class AuditSql implements AutoCloseable {
         return out;
     }
 
-    /** Cursor is a single durable row per logical verifier instance: last audit_event_id processed
-     * in a total INSERT order (mutation_event has no single global sequence, so this cursor tracks
-     * db_time+audit_event_id as a stable "already seen" watermark, and a per-stream sequence map for
-     * gap detection independent of that watermark). */
-    record CursorState(UUID lastAuditEventId, OffsetDateTime lastDbTime) {}
+    /** Unqualified: safe wherever the FROM clause is exactly stir_audit.mutation_event (optionally
+     * aliased) and no other table contributes columns to the same SELECT list - true everywhere
+     * this constant is used, including fetchUnverifiedEvents, whose correlated NOT EXISTS subquery
+     * has its own separate column scope and never conflicts with these names. */
+    private static final String EVENT_COLUMNS = """
+        audit_event_id, tenant_id, domain, sequence, db_time,
+        to_char(db_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as db_time_canonical,
+        table_oid, table_name, operation, entity_key_canonical, community_id, old_row_digest,
+        new_row_digest, row_digest_profile, session_user_name, session_role_reported,
+        application_name, txid::text as txid_text, client_addr::text as client_addr_text,
+        request_id, correlation_id, authorization_id, proposal_id, previous_hash, current_hash,
+        event_format_version
+        """;
 
-    CursorState readCursor(String cursorName) throws SQLException {
-        try (var ps = connection.prepareStatement(
-                "select last_audit_event_id from stir_audit.verifier_cursor where cursor_name = ?")) {
-            ps.setString(1, cursorName);
-            try (var rs = ps.executeQuery()) {
-                if (!rs.next()) return new CursorState(null, null);
-                UUID id = (UUID) rs.getObject("last_audit_event_id");
-                if (id == null) return new CursorState(null, null);
-                OffsetDateTime dbTime;
-                try (var ps2 = connection.prepareStatement("select db_time from stir_audit.mutation_event where audit_event_id = ?")) {
-                    ps2.setObject(1, id);
-                    try (var rs2 = ps2.executeQuery()) { rs2.next(); dbTime = rs2.getObject("db_time", OffsetDateTime.class); }
-                }
-                return new CursorState(id, dbTime);
-            }
-        }
+    private MutationEvent mapEvent(ResultSet rs) throws SQLException {
+        return new MutationEvent(
+            (UUID) rs.getObject("audit_event_id"), (UUID) rs.getObject("tenant_id"), rs.getString("domain"),
+            rs.getLong("sequence"), rs.getObject("db_time", OffsetDateTime.class), rs.getString("db_time_canonical"),
+            rs.getLong("table_oid"), rs.getString("table_name"), rs.getString("operation"),
+            rs.getString("entity_key_canonical"), (UUID) rs.getObject("community_id"), rs.getBytes("old_row_digest"),
+            rs.getBytes("new_row_digest"), rs.getString("row_digest_profile"), rs.getString("session_user_name"),
+            rs.getString("session_role_reported"), rs.getString("application_name"), rs.getString("txid_text"),
+            rs.getString("client_addr_text"), rs.getString("request_id"), rs.getString("correlation_id"),
+            rs.getString("authorization_id"), rs.getString("proposal_id"), rs.getBytes("previous_hash"),
+            rs.getBytes("current_hash"), rs.getString("event_format_version"));
     }
 
-    void writeCursor(String cursorName, UUID lastAuditEventId) throws SQLException {
-        try (var ps = connection.prepareStatement("""
-                insert into stir_audit.verifier_cursor (cursor_name, last_audit_event_id, updated_at)
-                values (?, ?, now())
-                on conflict (cursor_name) do update set last_audit_event_id = excluded.last_audit_event_id, updated_at = now()
-                """)) {
-            ps.setString(1, cursorName);
-            ps.setObject(2, lastAuditEventId);
-            ps.executeUpdate();
-        }
-    }
-
-    /** Ordered by (db_time, audit_event_id) as a total order stable enough to resume from - the
-     * per-stream (tenant,domain,sequence) ordering used for chain verification is derived
-     * separately inside ChainVerifier from whatever batch this returns. */
-    List<MutationEvent> fetchEventsAfter(OffsetDateTime afterDbTime, UUID afterEventId, int limit) throws SQLException {
+    /** P1-RA-001's actual fix: every covered event with no verification_result row for this rule
+     * version, full stop - no ordering assumption, so a transaction that commits late is picked up
+     * on the very next cycle that observes it, regardless of what any other stream did meanwhile.
+     * Ordered by (tenant_id, domain, sequence) so a single stream's events are processed in their
+     * real causal order within one batch, which is what ChainVerifier's predecessor lookups need -
+     * but this ordering is a courtesy for locality, never a completeness precondition. */
+    List<MutationEvent> fetchUnverifiedEvents(String ruleVersion, int limit) throws SQLException {
         String sql = """
-            select audit_event_id, tenant_id, domain, sequence, db_time, table_oid, table_name, operation,
-                   entity_key_canonical, community_id, old_row_digest, new_row_digest, row_digest_profile,
-                   session_user_name, session_role_reported, application_name, request_id, correlation_id,
-                   authorization_id, proposal_id, previous_hash, current_hash, event_format_version
-            from stir_audit.mutation_event
-            where (db_time, audit_event_id) > (coalesce(?, '-infinity'::timestamptz), coalesce(?, '00000000-0000-0000-0000-000000000000'::uuid))
-            order by db_time, audit_event_id
+            select %s
+            from stir_audit.mutation_event me
+            where not exists (
+              select 1 from stir_audit.verification_result vr
+              where vr.audit_event_id = me.audit_event_id and vr.verifier_rule_version = ?
+            )
+            order by me.tenant_id, me.domain, me.sequence
             limit ?
-            """;
+            """.formatted(EVENT_COLUMNS);
         var out = new ArrayList<MutationEvent>();
         try (var ps = connection.prepareStatement(sql)) {
-            ps.setObject(1, afterDbTime);
-            ps.setObject(2, afterEventId);
-            ps.setInt(3, limit);
-            try (var rs = ps.executeQuery()) {
-                while (rs.next()) out.add(mapEvent(rs));
-            }
+            ps.setString(1, ruleVersion);
+            ps.setInt(2, limit);
+            try (var rs = ps.executeQuery()) { while (rs.next()) out.add(mapEvent(rs)); }
         }
         return out;
     }
 
     /** All events for one (tenant,domain) stream from a given sequence onward, in sequence order -
-     * used by ChainVerifier to walk a stream's continuity independent of global fetch batching. */
+     * used by ChainVerifier to walk a stream's continuity, both incrementally (one predecessor
+     * lookup at a time via fetchEventAtOrNull) and for P1-RA-007's periodic full reconciliation. */
     List<MutationEvent> fetchStreamFrom(UUID tenantId, String domain, long fromSequenceInclusive) throws SQLException {
-        String sql = """
-            select audit_event_id, tenant_id, domain, sequence, db_time, table_oid, table_name, operation,
-                   entity_key_canonical, community_id, old_row_digest, new_row_digest, row_digest_profile,
-                   session_user_name, session_role_reported, application_name, request_id, correlation_id,
-                   authorization_id, proposal_id, previous_hash, current_hash, event_format_version
-            from stir_audit.mutation_event where tenant_id = ? and domain = ? and sequence >= ? order by sequence
-            """;
+        String sql = "select " + EVENT_COLUMNS +
+            " from stir_audit.mutation_event where tenant_id = ? and domain = ? and sequence >= ? order by sequence";
         var out = new ArrayList<MutationEvent>();
         try (var ps = connection.prepareStatement(sql)) {
             ps.setObject(1, tenantId); ps.setString(2, domain); ps.setLong(3, fromSequenceInclusive);
@@ -112,28 +106,8 @@ public final class AuditSql implements AutoCloseable {
         return out;
     }
 
-    private MutationEvent mapEvent(ResultSet rs) throws SQLException {
-        return new MutationEvent(
-            (UUID) rs.getObject("audit_event_id"), (UUID) rs.getObject("tenant_id"), rs.getString("domain"),
-            rs.getLong("sequence"), rs.getObject("db_time", OffsetDateTime.class), rs.getLong("table_oid"),
-            rs.getString("table_name"), rs.getString("operation"), rs.getString("entity_key_canonical"),
-            (UUID) rs.getObject("community_id"), rs.getBytes("old_row_digest"), rs.getBytes("new_row_digest"),
-            rs.getString("row_digest_profile"), rs.getString("session_user_name"), rs.getString("session_role_reported"),
-            rs.getString("application_name"), rs.getString("request_id"), rs.getString("correlation_id"),
-            rs.getString("authorization_id"), rs.getString("proposal_id"), rs.getBytes("previous_hash"),
-            rs.getBytes("current_hash"), rs.getString("event_format_version"));
-    }
-
-    /** Single event by its natural stream position - used to fetch a predecessor for one-link
-     * verification without needing the caller to have already fetched a contiguous batch. */
     MutationEvent fetchEventAtOrNull(UUID tenant, String domain, long sequence) throws SQLException {
-        String sql = """
-            select audit_event_id, tenant_id, domain, sequence, db_time, table_oid, table_name, operation,
-                   entity_key_canonical, community_id, old_row_digest, new_row_digest, row_digest_profile,
-                   session_user_name, session_role_reported, application_name, request_id, correlation_id,
-                   authorization_id, proposal_id, previous_hash, current_hash, event_format_version
-            from stir_audit.mutation_event where tenant_id = ? and domain = ? and sequence = ?
-            """;
+        String sql = "select " + EVENT_COLUMNS + " from stir_audit.mutation_event where tenant_id = ? and domain = ? and sequence = ?";
         try (var ps = connection.prepareStatement(sql)) {
             ps.setObject(1, tenant); ps.setString(2, domain); ps.setLong(3, sequence);
             try (var rs = ps.executeQuery()) { return rs.next() ? mapEvent(rs) : null; }
@@ -147,34 +121,65 @@ public final class AuditSql implements AutoCloseable {
         }
     }
 
-    /** Recomputes current_hash purely from the event's OWN already-stored fields (never from live
-     * table state) - catches a stored event row whose fields were altered without recomputing its
-     * hash. This can only ever be exercised by a table/function owner or PostgreSQL superuser: no
-     * UPDATE policy on mutation_event exists for any role including stir_audit_owner. */
+    /** P1-RA-005: version-dispatched. A V1 event (event_format_version='STIR_AUDIT_EVENT_V1',
+     * every event this MVP wrote before the remediation) recomputes against the original,
+     * untouched compute_event_hash(); a V2 event recomputes against compute_event_hash_v2(), which
+     * additionally commits audit_event_id/db_time/txid/session_role_reported/application_name/
+     * client_addr/event_format_version - never silently reinterpreting what a V1 event's own hash
+     * already meant. */
     byte[] recomputeEventHash(MutationEvent e) throws SQLException {
-        try (var ps = connection.prepareStatement(
-                "select stir_audit.compute_event_hash(?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
-            ps.setBytes(1, e.previousHash());
-            ps.setLong(2, e.sequence());
-            ps.setObject(3, e.tenantId());
-            ps.setString(4, e.domain());
-            ps.setLong(5, e.tableOid());
-            ps.setString(6, e.tableName());
-            ps.setString(7, e.operation());
-            ps.setString(8, e.entityKeyCanonical());
-            ps.setBytes(9, e.oldRowDigest());
-            ps.setBytes(10, e.newRowDigest());
-            ps.setString(11, e.rowDigestProfile());
-            ps.setString(12, e.sessionUserName());
-            ps.setObject(13, e.communityId());
-            try (var rs = ps.executeQuery()) { rs.next(); return rs.getBytes(1); }
+        if ("STIR_AUDIT_EVENT_V1".equals(e.eventFormatVersion())) {
+            try (var ps = connection.prepareStatement("select stir_audit.compute_event_hash(?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
+                ps.setBytes(1, e.previousHash());
+                ps.setLong(2, e.sequence());
+                ps.setObject(3, e.tenantId());
+                ps.setString(4, e.domain());
+                ps.setLong(5, e.tableOid());
+                ps.setString(6, e.tableName());
+                ps.setString(7, e.operation());
+                ps.setString(8, e.entityKeyCanonical());
+                ps.setBytes(9, e.oldRowDigest());
+                ps.setBytes(10, e.newRowDigest());
+                ps.setString(11, e.rowDigestProfile());
+                ps.setString(12, e.sessionUserName());
+                ps.setObject(13, e.communityId());
+                try (var rs = ps.executeQuery()) { rs.next(); return rs.getBytes(1); }
+            }
         }
+        if ("STIR_AUDIT_EVENT_V2".equals(e.eventFormatVersion())) {
+            try (var ps = connection.prepareStatement(
+                    "select stir_audit.compute_event_hash_v2(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
+                ps.setBytes(1, e.previousHash());
+                ps.setLong(2, e.sequence());
+                ps.setObject(3, e.auditEventId());
+                ps.setObject(4, e.tenantId());
+                ps.setString(5, e.domain());
+                ps.setLong(6, e.tableOid());
+                ps.setString(7, e.tableName());
+                ps.setString(8, e.operation());
+                ps.setString(9, e.entityKeyCanonical());
+                ps.setBytes(10, e.oldRowDigest());
+                ps.setBytes(11, e.newRowDigest());
+                ps.setString(12, e.rowDigestProfile());
+                ps.setString(13, e.sessionUserName());
+                ps.setString(14, e.sessionRoleReported());
+                ps.setString(15, e.applicationName());
+                ps.setString(16, e.clientAddrText());
+                ps.setString(17, e.requestId());
+                ps.setString(18, e.correlationId());
+                ps.setString(19, e.authorizationId());
+                ps.setString(20, e.proposalId());
+                ps.setString(21, e.dbTimeCanonical());
+                ps.setString(22, e.txidText());
+                ps.setString(23, e.eventFormatVersion());
+                ps.setObject(24, e.communityId());
+                try (var rs = ps.executeQuery()) { rs.next(); return rs.getBytes(1); }
+            }
+        }
+        throw new IllegalStateException("Unknown event_format_version '" + e.eventFormatVersion() +
+            "' for audit_event_id=" + e.auditEventId() + " - no recomputation formula registered for it.");
     }
 
-    /** The live row's current digest, or null if no row with this exact PK exists right now.
-     * Entity key predicate compares every PK column as text - deliberately type-agnostic (uuid,
-     * int, text all have a stable text form) since Phase 1 targets pilot-scale volume, not
-     * index-optimal reconciliation queries. */
     byte[] currentRowDigestOrNull(String tableName, List<String> pkColumns, String entityKeyCanonical) throws SQLException {
         Map<String, String> pk = parseEntityKeyCanonical(entityKeyCanonical);
         var where = new StringBuilder();
@@ -187,10 +192,7 @@ public final class AuditSql implements AutoCloseable {
         String sql = "select stir_audit.row_digest_pg17_jsonb_text_sha256_v1(to_jsonb(t)) from stir." + quoteIdent(tableName) + " t where " + where;
         try (var ps = connection.prepareStatement(sql)) {
             for (int i = 0; i < values.size(); i++) ps.setString(i + 1, values.get(i));
-            try (var rs = ps.executeQuery()) {
-                if (!rs.next()) return null;
-                return rs.getBytes(1);
-            }
+            try (var rs = ps.executeQuery()) { return rs.next() ? rs.getBytes(1) : null; }
         }
     }
 
@@ -206,9 +208,6 @@ public final class AuditSql implements AutoCloseable {
 
     private static String quoteIdent(String ident) { return "\"" + ident.replace("\"", "\"\"") + "\""; }
 
-    /** Distinct entity keys whose LATEST recorded event is not a DELETE - the reconciler's set of
-     * "this row should currently exist" claims, to check against the live table for a silent
-     * disappearance the trigger should have caught. */
     List<String> entityKeysExpectedLive(long tableOid) throws SQLException {
         String sql = """
             select distinct on (entity_key_canonical) entity_key_canonical, operation
@@ -225,11 +224,22 @@ public final class AuditSql implements AutoCloseable {
         return out;
     }
 
-    /** Every currently-live PK for a covered table, as canonical strings in the same "col=val;..."
-     * shape mutation_event stores - used to detect a row that exists with zero audit trail at all
-     * (the other half of reconciliation: an insert the trigger somehow never fired for). */
+    /** P1-RA-003: every (table_oid, entity_key) pair imported once at a Vn baseline migration's
+     * apply time - rows that legitimately predate the audit trigger's own existence, never events. */
+    Set<String> baselineImportedKeys(long tableOid) throws SQLException {
+        var out = new HashSet<String>();
+        try (var ps = connection.prepareStatement("select entity_key_canonical from stir_audit.baseline_import where table_oid = ?")) {
+            ps.setLong(1, tableOid);
+            try (var rs = ps.executeQuery()) { while (rs.next()) out.add(rs.getString(1)); }
+        }
+        return out;
+    }
+
+    /** A single, internally consistent read of "what currently lives in this table", queried
+     * inside one statement/snapshot - see Reconciler's own comment on why calling this exactly
+     * once per table per pass (rather than issuing it, then issuing a second, separately-snapshot
+     * query later) is what actually addresses the autocommit-race gap Codex flagged as unresolved. */
     List<String> liveEntityKeys(String tableName, List<String> pkColumns) throws SQLException {
-        String cols = String.join(",", pkColumns.stream().map(c -> "\"" + c + "\"").toList());
         String concatExpr = pkColumns.stream().map(c -> "'" + c + "=' || \"" + c + "\"::text").reduce((a, b) -> a + " || ';' || " + b).orElseThrow();
         String sql = "select " + concatExpr + " as k from stir." + quoteIdent(tableName) + " t";
         var out = new ArrayList<String>();
@@ -239,13 +249,121 @@ public final class AuditSql implements AutoCloseable {
         return out;
     }
 
-    void upsertVerificationResult(UUID auditEventId, String ruleVersion, VerificationVerdict verdict, String reason) throws SQLException {
+    /** Reconciliation's TOCTOU fix (Codex's own unreproduced-but-real concurrency gap note): the
+     * three reads a table's reconciliation needs (live rows, mutation_event's "should still be
+     * live" claims, baseline-imported keys) run inside ONE REPEATABLE READ transaction, so
+     * PostgreSQL's own MVCC snapshot - fixed at this transaction's first statement, not the
+     * connection's default per-statement READ COMMITTED - guarantees all three see the identical
+     * point in time. A mutation that commits after this snapshot is taken is simply invisible to
+     * this pass entirely (correctly deferred to the next reconciliation cycle), never partially
+     * visible to one read and not another. No application-level lock of any kind. */
+    record TableSnapshot(Set<String> live, Set<String> expectedLive, Set<String> baselineImported) {}
+
+    TableSnapshot readConsistentTableSnapshot(TableCoverage table) throws SQLException {
+        boolean priorAutoCommit = connection.getAutoCommit();
+        connection.setAutoCommit(false);
+        try (var st = connection.createStatement()) {
+            st.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY");
+            // The first statement inside this block establishes the snapshot every later
+            // statement in the same transaction reuses - order among these three reads no longer
+            // matters for consistency, only that they share this one transaction.
+            var live = new HashSet<>(liveEntityKeys(table.tableName(), table.pkColumns()));
+            var expectedLive = new HashSet<>(entityKeysExpectedLive(table.tableOid()));
+            var baseline = baselineImportedKeys(table.tableOid());
+            connection.commit(); // read-only; commit vs rollback is immaterial, commit releases resources promptly
+            return new TableSnapshot(live, expectedLive, baseline);
+        } catch (SQLException ex) {
+            connection.rollback();
+            throw ex;
+        } finally {
+            connection.setAutoCommit(priorAutoCommit);
+        }
+    }
+
+    // ===== P1-RA-002: verdict + incident + cursor progress committed atomically. A crash at any
+    // point before this transaction's COMMIT leaves NEITHER the verdict NOR the incident NOR the
+    // cursor update persisted - the event is picked up again next cycle by fetchUnverifiedEvents
+    // (which needs no cursor to find it) and reprocessed from scratch, producing the identical
+    // verdict and, if it was a VIOLATION, the identical incident (deduplicated by dedup_key if the
+    // very same incident is somehow computed twice). =====
+
+    record IncidentToRecord(UUID tenantId, String domain, UUID auditEventId, String reasonCode, String evidenceJson, String dedupKey) {}
+
+    /** Records a verdict, optionally one incident, and advances the observability cursor, all in
+     * one JDBC transaction. `incident` is null for every non-VIOLATION verdict. */
+    void recordVerdictAtomically(UUID auditEventId, String ruleVersion, VerificationVerdict verdict,
+                                  String reason, IncidentToRecord incident, String cursorName) throws SQLException {
+        boolean priorAutoCommit = connection.getAutoCommit();
+        connection.setAutoCommit(false);
+        try {
+            upsertVerificationResultTx(auditEventId, ruleVersion, verdict, reason);
+            if (incident != null) insertSecurityIncidentTx(incident);
+            if (cursorName != null) writeCursorTx(cursorName, auditEventId);
+            connection.commit();
+        } catch (SQLException | RuntimeException ex) {
+            connection.rollback();
+            throw ex;
+        } finally {
+            connection.setAutoCommit(priorAutoCommit);
+        }
+    }
+
+    /** Same atomicity guarantee as recordVerdictAtomically, for a chain-level incident detected by
+     * periodic full reconciliation (P1-RA-007), which has no single audit_event_id to anchor a
+     * verification_result row to - only the incident (deduplicated by dedup_key) and the
+     * reconciliation checkpoint advance together. */
+    void recordChainIncidentAtomically(IncidentToRecord incident, UUID tenant, String domain,
+                                        long verifiedThroughSequence, byte[] verifiedHead) throws SQLException {
+        boolean priorAutoCommit = connection.getAutoCommit();
+        connection.setAutoCommit(false);
+        try {
+            if (incident != null) insertSecurityIncidentTx(incident);
+            upsertChainCheckpointTx(tenant, domain, verifiedThroughSequence, verifiedHead);
+            connection.commit();
+        } catch (SQLException | RuntimeException ex) {
+            connection.rollback();
+            throw ex;
+        } finally {
+            connection.setAutoCommit(priorAutoCommit);
+        }
+    }
+
+    private void upsertVerificationResultTx(UUID auditEventId, String ruleVersion, VerificationVerdict verdict, String reason) throws SQLException {
         try (var ps = connection.prepareStatement("""
                 insert into stir_audit.verification_result (audit_event_id, verifier_rule_version, result, reason, verified_at)
                 values (?, ?, ?, ?, now())
                 on conflict (audit_event_id, verifier_rule_version) do update set result = excluded.result, reason = excluded.reason, verified_at = now()
                 """)) {
             ps.setObject(1, auditEventId); ps.setString(2, ruleVersion); ps.setString(3, verdict.name()); ps.setString(4, reason);
+            ps.executeUpdate();
+        }
+    }
+
+    /** For a Reconciler row-existence finding, which has no single audit_event_id to attach a
+     * verification_result to and no chain checkpoint to advance - just the incident, deduplicated
+     * by dedup_key. A single INSERT is already atomic on its own; no explicit transaction needed. */
+    void recordIncidentOnly(IncidentToRecord incident) throws SQLException {
+        insertSecurityIncidentTx(incident);
+    }
+
+    private void insertSecurityIncidentTx(IncidentToRecord incident) throws SQLException {
+        try (var ps = connection.prepareStatement(
+                "insert into stir_audit.security_incident (tenant_id, domain, audit_event_id, reason_code, evidence, dedup_key) " +
+                "values (?,?,?,?,?::jsonb,?) on conflict (dedup_key) do nothing")) {
+            ps.setObject(1, incident.tenantId()); ps.setString(2, incident.domain()); ps.setObject(3, incident.auditEventId());
+            ps.setString(4, incident.reasonCode()); ps.setString(5, incident.evidenceJson()); ps.setString(6, incident.dedupKey());
+            ps.executeUpdate();
+        }
+    }
+
+    private void writeCursorTx(String cursorName, UUID lastAuditEventId) throws SQLException {
+        try (var ps = connection.prepareStatement("""
+                insert into stir_audit.verifier_cursor (cursor_name, last_audit_event_id, updated_at)
+                values (?, ?, now())
+                on conflict (cursor_name) do update set last_audit_event_id = excluded.last_audit_event_id, updated_at = now()
+                """)) {
+            ps.setString(1, cursorName);
+            ps.setObject(2, lastAuditEventId);
             ps.executeUpdate();
         }
     }
@@ -257,31 +375,56 @@ public final class AuditSql implements AutoCloseable {
         }
     }
 
-    void insertSecurityIncident(UUID tenantId, String domain, UUID auditEventId, String reasonCode, String evidenceJson) throws SQLException {
+    long countIncidents() throws SQLException { return queryLong("select count(*) from stir_audit.security_incident"); }
+
+    // ===== P1-RA-007: periodic full-chain reconciliation checkpoint (durable, per stream) =====
+
+    record ChainCheckpoint(long lastVerifiedSequence, byte[] lastVerifiedHead) {}
+
+    ChainCheckpoint readChainCheckpoint(UUID tenant, String domain) throws SQLException {
         try (var ps = connection.prepareStatement(
-                "insert into stir_audit.security_incident (tenant_id, domain, audit_event_id, reason_code, evidence) values (?,?,?,?,?::jsonb)")) {
-            ps.setObject(1, tenantId); ps.setString(2, domain); ps.setObject(3, auditEventId);
-            ps.setString(4, reasonCode); ps.setString(5, evidenceJson);
+                "select last_verified_sequence, last_verified_head from stir_audit.chain_reconciliation_checkpoint where tenant_id = ? and domain = ?")) {
+            ps.setObject(1, tenant); ps.setString(2, domain);
+            try (var rs = ps.executeQuery()) {
+                if (!rs.next()) return new ChainCheckpoint(0, null);
+                return new ChainCheckpoint(rs.getLong("last_verified_sequence"), rs.getBytes("last_verified_head"));
+            }
+        }
+    }
+
+    private void upsertChainCheckpointTx(UUID tenant, String domain, long throughSequence, byte[] head) throws SQLException {
+        try (var ps = connection.prepareStatement("""
+                insert into stir_audit.chain_reconciliation_checkpoint (tenant_id, domain, last_verified_sequence, last_verified_head, last_run_at)
+                values (?, ?, ?, ?, now())
+                on conflict (tenant_id, domain) do update set last_verified_sequence = excluded.last_verified_sequence,
+                  last_verified_head = excluded.last_verified_head, last_run_at = now()
+                """)) {
+            ps.setObject(1, tenant); ps.setString(2, domain); ps.setLong(3, throughSequence); ps.setBytes(4, head);
             ps.executeUpdate();
         }
     }
 
-    void listen(String channel) throws SQLException {
-        try (var st = connection.createStatement()) { st.execute("LISTEN " + channel); }
+    /** All (tenant,domain) streams that currently have at least one event - the periodic scan's
+     * work list. */
+    List<Map.Entry<UUID, String>> allStreams() throws SQLException {
+        var out = new ArrayList<Map.Entry<UUID, String>>();
+        try (var ps = connection.prepareStatement("select tenant_id, domain from stir_audit.stream_head");
+             var rs = ps.executeQuery()) {
+            while (rs.next()) out.add(Map.entry((UUID) rs.getObject("tenant_id"), rs.getString("domain")));
+        }
+        return out;
     }
 
-    /** True proof stir_auditor cannot even reach idax_app's own tables it has no business
-     * reading (defense-in-depth self-check, not a security control by itself). */
-    boolean canSelect(String schemaQualifiedTable) throws SQLException {
-        try (var ps = connection.prepareStatement("select has_table_privilege(current_user, ?, 'SELECT')")) {
-            ps.setString(1, schemaQualifiedTable);
-            try (var rs = ps.executeQuery()) { rs.next(); return rs.getBoolean(1); }
+    Map.Entry<Long, byte[]> currentStreamHead(UUID tenant, String domain) throws SQLException {
+        try (var ps = connection.prepareStatement("select sequence, head_hash from stir_audit.stream_head where tenant_id = ? and domain = ?")) {
+            ps.setObject(1, tenant); ps.setString(2, domain);
+            try (var rs = ps.executeQuery()) {
+                if (!rs.next()) return Map.entry(0L, new byte[0]);
+                return Map.entry(rs.getLong("sequence"), rs.getBytes("head_hash"));
+            }
         }
     }
 
-    /** Generic scalar helper for the domain rules' own structural queries (signature counts, vote
-     * duplicates, event-history checks) - all read-only, all against stir.* tables stir_auditor
-     * already has SELECT on via its own cross-tenant RLS policy. */
     public long queryLong(String sql, Object... params) throws SQLException {
         try (var ps = connection.prepareStatement(sql)) {
             for (int i = 0; i < params.length; i++) ps.setObject(i + 1, params[i]);
@@ -303,6 +446,17 @@ public final class AuditSql implements AutoCloseable {
             try (var rs = ps.executeQuery()) { while (rs.next()) out.add(rs.getString(1)); }
         }
         return out;
+    }
+
+    void listen(String channel) throws SQLException {
+        try (var st = connection.createStatement()) { st.execute("LISTEN " + channel); }
+    }
+
+    boolean canSelect(String schemaQualifiedTable) throws SQLException {
+        try (var ps = connection.prepareStatement("select has_table_privilege(current_user, ?, 'SELECT')")) {
+            ps.setString(1, schemaQualifiedTable);
+            try (var rs = ps.executeQuery()) { rs.next(); return rs.getBoolean(1); }
+        }
     }
 
     @Override public void close() throws SQLException { connection.close(); }
