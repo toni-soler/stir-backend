@@ -9,7 +9,7 @@ public final class Main {
         Config config = Config.fromEnv();
         System.out.println("level=INFO component=stir-audit-verifier message=starting jdbc=" + config.jdbcUrl() + " user=" + config.user());
 
-        HealthServer health = new HealthServer();
+        HealthServer health = new HealthServer(config);
         health.start(config.healthPort());
 
         VerifierLoop loop = new VerifierLoop(config, health);

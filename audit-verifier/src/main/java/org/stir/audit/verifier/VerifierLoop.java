@@ -17,7 +17,17 @@ import org.stir.audit.verifier.domain.DomainRule;
  *      stream_head, catching historical tampering the incremental pass has already scrolled past).
  * verdict+incident+cursor-advance is one atomic transaction (P1-RA-002): a crash at any point
  * leaves nothing partially persisted, and reprocessing an already-fully-persisted event is a
- * cheap no-op (hasVerificationResult skip) rather than a correctness requirement. */
+ * cheap no-op (hasVerificationResult skip) rather than a correctness requirement.
+ *
+ * P1-R3-001 (Codex's third reaudit): every `System.out.println("level=CRITICAL ...")` line below is
+ * BEST_EFFORT_CRITICAL_LOG, never GUARANTEED_ALERT_DELIVERY. `recordVerdictAtomically`/
+ * `recordIncidentOnly`/`recordChainIncidentAtomically` already commit `security_incident` durably
+ * BEFORE any of these println calls run - a crash between that commit and the println (proven
+ * reproducible: the exact same shape as this loop's own commit-then-log ordering) loses the log
+ * line but never the incident row. `HealthServer`'s `/security-status` endpoint is the canonical,
+ * durable place to observe an open incident - it queries `stir_audit.security_incident` fresh on
+ * every request, independent of whether this process ever successfully printed anything about it.
+ * Do not read "no CRITICAL line in the log" as "no incident occurred". */
 final class VerifierLoop {
     private final Config config;
     private final String ruleVersion;
@@ -41,11 +51,6 @@ final class VerifierLoop {
                 runIncrementalPass(sql);
                 cycleCount++;
                 if (cycleCount % PERIODIC_RECONCILE_EVERY_N_CYCLES == 0) runPeriodicChainReconciliation(sql);
-                // Persistent/open incident count for /health, always refreshed AFTER both passes so
-                // it reflects anything the periodic pass just added this cycle too - deliberately
-                // separate from the CRITICAL log gating above: this is allowed, and meant, to stay
-                // "open" every cycle without re-triggering a new external alert (see runIncrementalPass).
-                health.setOpenIncidentCount(sql.countIncidents());
                 health.markCycleSuccess();
             } catch (Exception e) {
                 health.markCycleError(e.toString());
@@ -101,6 +106,9 @@ final class VerifierLoop {
                 // checked anyway for the same reason the Reconciler/chain-reconciliation branches
                 // below need it: a uniform, always-correct "only log what wasn't already known" rule,
                 // not one that quietly depends on fetchUnverifiedEvents' own anti-join to hold.
+                // BEST_EFFORT_CRITICAL_LOG (P1-R3-001): the incident is already durably committed by
+                // recordVerdictAtomically above; this line is a diagnostic convenience only, not the
+                // alert's proof of existence or delivery.
                 if (incident != null && isNewIncident) {
                     System.out.println("level=CRITICAL component=stir-audit-verifier reason_code=" + incident.reasonCode() +
                         " tenant_id=" + incident.tenantId() + " domain=" + incident.domain() + " audit_event_id=" + incident.auditEventId() +
@@ -123,6 +131,8 @@ final class VerifierLoop {
                 jsonEscape(finding.entityKeyCanonical()) + "\",\"detail\":\"" + jsonEscape(finding.detail()) + "\"}";
             var incident = new AuditSql.IncidentToRecord(null, null, null, finding.reasonCode(), evidence, dedupKey);
             boolean isNewIncident = sql.recordIncidentOnly(incident);
+            // BEST_EFFORT_CRITICAL_LOG (P1-R3-001): same as above - the row already exists, durably,
+            // by the time this line would print.
             if (isNewIncident) {
                 System.out.println("level=CRITICAL component=stir-audit-verifier reason_code=" + finding.reasonCode() +
                     " table=" + finding.tableName() + " dedup_key=" + dedupKey + " evidence=" + evidence);
@@ -163,6 +173,7 @@ final class VerifierLoop {
                 // persistent condition re-discovered every periodic pass, exactly the alert-storm
                 // shape Codex's second reaudit found here specifically - only log when genuinely new.
                 boolean isNewIncident = sql.recordChainIncidentAtomically(incident, tenant, domain, checkpoint.lastVerifiedSequence(), checkpoint.lastVerifiedHead());
+                // BEST_EFFORT_CRITICAL_LOG (P1-R3-001): same as above.
                 if (isNewIncident) {
                     System.out.println("level=CRITICAL component=stir-audit-verifier reason_code=CHAIN_RECONCILE_" + broken.reasonCode() +
                         " tenant_id=" + tenant + " domain=" + domain + " dedup_key=" + dedupKey + " evidence=" + evidence);

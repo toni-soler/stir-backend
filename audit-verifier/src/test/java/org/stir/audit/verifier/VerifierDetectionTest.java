@@ -837,7 +837,7 @@ class VerifierDetectionTest {
                 });
             }
         }
-        var health = new HealthServer();
+        var health = new HealthServer(config);
         try (AuditSql sql = new AuditSql(config)) {
             new VerifierLoop(config, health).runOneIncrementalPassForTest(sql);
         }
@@ -979,7 +979,7 @@ class VerifierDetectionTest {
                     UUID.randomUUID() + "','" + tenant + "','" + caseId + "','FINAL','final reason','" + decisor + "',now(),3)");
             }
         }
-        var health = new HealthServer();
+        var health = new HealthServer(config);
         try (AuditSql sql = new AuditSql(config)) {
             new VerifierLoop(config, health).runOneIncrementalPassForTest(sql);
         }
@@ -1199,12 +1199,14 @@ class VerifierDetectionTest {
         }
     }
 
-    /** Item 4 (second reaudit): a persistent, structural incident (Reconciler-discovered, and
-     * rediscovered fresh every single cycle since it is a standing condition, not a one-time event)
-     * must emit the external CRITICAL log line exactly ONCE across many cycles - dedup_key already
-     * deduplicated the DB row; the log line itself used to print unconditionally every cycle
-     * regardless. health.openIncidentCount must keep reporting it as open the whole time. */
-    @Test void persistentIncidentEmitsCriticalOnceAcrossMultipleCyclesButStaysOpenInHealth() throws Exception {
+    /** Item 4 (second reaudit) + P1-R3-001 (third reaudit) framing: a persistent, structural
+     * incident (Reconciler-discovered, rediscovered fresh every single cycle since it is a standing
+     * condition, not a one-time event) keeps the BEST_EFFORT_CRITICAL_LOG line quiet on rediscovery
+     * across many cycles - a diagnostic convenience, never the proof the incident exists. The
+     * durable, canonical signal is `security_incident` itself, verified here via
+     * `HealthServer.querySecurityStatus` (the same DB-backed query `/security-status` uses),
+     * queried completely independently of whatever this process's log happened to print. */
+    @Test void persistentIncidentStaysQuietInBestEffortLogButRemainsDurablyCriticalInSecurityStatus() throws Exception {
         UUID tenant = UUID.randomUUID();
         UUID orphanId = UUID.randomUUID();
         try (Connection c = admin(); Statement st = c.createStatement()) {
@@ -1213,7 +1215,7 @@ class VerifierDetectionTest {
                 "','" + UUID.randomUUID() + "','orphan-name','scope','{}','1','unit','ref','" + UUID.randomUUID() + "',now())");
             st.execute("set session_replication_role = default");
         }
-        var health = new HealthServer();
+        var health = new HealthServer(config);
         var loop = new VerifierLoop(config, health);
         var criticalLinesForThisIncident = new ArrayList<String>();
         java.io.PrintStream original = System.out;
@@ -1223,7 +1225,6 @@ class VerifierDetectionTest {
             for (int cycle = 0; cycle < 4; cycle++) {
                 try (AuditSql sql = new AuditSql(config)) {
                     loop.runOneIncrementalPassForTest(sql);
-                    health.setOpenIncidentCount(sql.countIncidents());
                 }
             }
             System.out.flush();
@@ -1234,8 +1235,10 @@ class VerifierDetectionTest {
             System.setOut(original);
         }
         assertEquals(1, criticalLinesForThisIncident.size(),
-            "4 cycles rediscovering the SAME persistent incident must emit exactly ONE CRITICAL log line: " + criticalLinesForThisIncident);
-        assertTrue(health.openIncidentCount() >= 1, "health must keep reporting the incident as open across cycles even though no new CRITICAL fired for it");
+            "the best-effort log should stay quiet on rediscovery of the same persistent condition (diagnostic convenience only, not a durability guarantee): " + criticalLinesForThisIncident);
+        var status = HealthServer.querySecurityStatus(config);
+        assertEquals("CRITICAL_SECURITY_INCIDENT", status.securityState());
+        assertTrue(status.openIncidentCount() >= 1, "the durable, DB-backed security status must keep reporting the incident as open regardless of the best-effort log");
     }
 
     /** P1-RA-002 "after commit" fault-injection boundary (item 5, second reaudit): the OTHER half of
