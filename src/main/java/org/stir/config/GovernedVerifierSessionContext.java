@@ -20,7 +20,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 public class GovernedVerifierSessionContext {
     @Bean
     @Primary
-    DbSessionContextService governedVerifierSessionContext(DataSource dataSource) {
+    DbSessionContextService governedVerifierDbSessionContext(DataSource dataSource) {
         JdbcTemplate jdbc = new JdbcTemplate(dataSource);
         return new DbSessionContextService(dataSource) {
             @Override
