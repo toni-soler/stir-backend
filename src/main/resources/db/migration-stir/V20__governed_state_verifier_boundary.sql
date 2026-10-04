@@ -94,3 +94,24 @@ BEGIN
     END IF;
   END LOOP;
 END $$;
+
+-- 6. Permission evaluation read path (idax-core PermissionService reads these to answer @PreAuthorize
+--    for the caller). Read-only. Each tenant-scoped policy is the same USING expression idax_app already
+--    uses on that table, copied from pg_policies, so the verifier sees exactly the tenant its caller sees.
+DO $$
+DECLARE t text; p record;
+BEGIN
+  FOREACH t IN ARRAY ARRAY['idax_permission', 'idax_role', 'idax_role_permission', 'idax_user_role'] LOOP
+    IF to_regclass('idax_core.' || t) IS NOT NULL THEN
+      EXECUTE format('GRANT SELECT ON idax_core.%I TO idax_governed_verifier', t);
+    END IF;
+  END LOOP;
+  FOR p IN SELECT tablename, qual FROM pg_policies
+           WHERE schemaname = 'idax_core'
+             AND tablename IN ('idax_role', 'idax_role_permission', 'idax_user_role')
+             AND 'idax_app' = ANY (roles)
+  LOOP
+    EXECUTE format('CREATE POLICY %I ON idax_core.%I FOR SELECT TO idax_governed_verifier USING (%s)',
+                   p.tablename || '_governed_verifier_read', p.tablename, p.qual);
+  END LOOP;
+END $$;
