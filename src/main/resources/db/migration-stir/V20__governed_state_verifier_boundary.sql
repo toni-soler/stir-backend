@@ -26,13 +26,15 @@ INSERT INTO _governed_tables VALUES
 
 -- 1. Ordinary runtime roles lose every write, table-level and column-level.
 DO $$
-DECLARE t record; c record;
+DECLARE t record; c record; r record;
 BEGIN
-  FOR t IN SELECT name FROM _governed_tables LOOP
-    EXECUTE format('REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON stir.%I FROM idax_app, idax_backend', t.name);
-    FOR c IN SELECT column_name FROM information_schema.columns WHERE table_schema = 'stir' AND table_name = t.name LOOP
-      EXECUTE format('REVOKE INSERT (%I), UPDATE (%I), REFERENCES (%I) ON stir.%I FROM idax_app, idax_backend',
-                     c.column_name, c.column_name, c.column_name, t.name);
+  FOR r IN SELECT rolname FROM pg_roles WHERE rolname IN ('idax_app', 'idax_backend') LOOP
+    FOR t IN SELECT name FROM _governed_tables LOOP
+      EXECUTE format('REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON stir.%I FROM %I', t.name, r.rolname);
+      FOR c IN SELECT column_name FROM information_schema.columns WHERE table_schema = 'stir' AND table_name = t.name LOOP
+        EXECUTE format('REVOKE INSERT (%I), UPDATE (%I), REFERENCES (%I) ON stir.%I FROM %I',
+                       c.column_name, c.column_name, c.column_name, t.name, r.rolname);
+      END LOOP;
     END LOOP;
   END LOOP;
 END $$;
