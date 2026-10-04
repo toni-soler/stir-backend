@@ -43,6 +43,7 @@ class WebAuthnSevenKeysPostgresTest {
         }
         Flyway.configure().dataSource(postgres.getJdbcUrl(),postgres.getUsername(),postgres.getPassword())
             .schemas("stir").locations("classpath:db/migration-stir").load().migrate();
+        IdaxCoreMembershipFixture.install(postgres);
     }
     @BeforeEach void setup() throws Exception {
         connection=DriverManager.getConnection(postgres.getJdbcUrl(),postgres.getUsername(),postgres.getPassword());
@@ -50,7 +51,7 @@ class WebAuthnSevenKeysPostgresTest {
         jdbc.execute("set local role idax_app");
         jdbc.queryForObject("select set_config('app.tenant_id',?,true)",String.class,tenant.toString());
         TenantContext.set(new TenantContext(tenant,null,UUID.randomUUID(),"test",TenantContext.DbRole.IDAX_APP));
-        user=mock(CurrentUser.class); when(user.getUserId()).thenReturn(UUID.randomUUID());
+        user=mock(CurrentUser.class); UUID actorId=UUID.randomUUID(); when(user.getUserId()).thenReturn(actorId); IdaxCoreMembershipFixture.member(connection,tenant,actorId,"owner");
         webauthn=new WebAuthnCredentialService(jdbc);
         webauthn.rpId=RP_ID; webauthn.rpName="STIR Test"; webauthn.allowedOriginsCsv=ORIGIN;
         service=new SevenKeysService(jdbc,webauthn);
