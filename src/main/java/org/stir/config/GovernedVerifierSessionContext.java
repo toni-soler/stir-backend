@@ -33,7 +33,7 @@ public class GovernedVerifierSessionContext {
                     throw new IllegalStateException("Tenant context must be applied inside a transaction");
                 }
                 try {
-                    jdbc.queryForObject("select idax_core.set_tenant(?)", Object.class, context.getTenantId().toString());
+                    jdbc.queryForObject("select idax_core.set_tenant(?::uuid)", Object.class, context.getTenantId().toString());
                     if (context.getAppUserId() != null) {
                         jdbc.queryForObject("select set_config('app.user_id', ?, true)", String.class, context.getAppUserId().toString());
                     }
