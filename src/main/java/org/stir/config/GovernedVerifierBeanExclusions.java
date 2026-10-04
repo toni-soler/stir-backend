@@ -28,7 +28,9 @@ public class GovernedVerifierBeanExclusions {
             @Override
             public void postProcessBeanDefinitionRegistry(BeanDefinitionRegistry registry) {
                 for (String name : registry.getBeanDefinitionNames()) {
-                    if (CATALOG_WRITERS.contains(registry.getBeanDefinition(name).getBeanClassName())) {
+                    // @Bean factory-method definitions have no bean class name; Set.of(...).contains(null) would throw
+                    String className = registry.getBeanDefinition(name).getBeanClassName();
+                    if (className != null && CATALOG_WRITERS.contains(className)) {
                         registry.removeBeanDefinition(name);
                     }
                 }

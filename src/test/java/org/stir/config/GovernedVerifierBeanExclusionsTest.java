@@ -27,6 +27,8 @@ class GovernedVerifierBeanExclusionsTest {
         register(factory, "lifecycle", LIFECYCLE);
         register(factory, "loader", LOADER);
         register(factory, "registrar", REGISTRAR);
+        // a @Bean factory method has no bean class name: the exclusion must skip it, not fail
+        factory.registerBeanDefinition("factoryMethodBean", new GenericBeanDefinition());
 
         BeanDefinitionRegistryPostProcessor exclusion = GovernedVerifierBeanExclusions.excludePermissionCatalogWriter();
         exclusion.postProcessBeanDefinitionRegistry(factory);
@@ -34,5 +36,6 @@ class GovernedVerifierBeanExclusionsTest {
         assertFalse(factory.containsBeanDefinition("lifecycle"), "the boot-time catalog writer must not exist in the verifier");
         assertFalse(factory.containsBeanDefinition("loader"), "the legacy catalog loader must not exist in the verifier");
         assertTrue(factory.containsBeanDefinition("registrar"), "unrelated permission beans stay available for reads");
+        assertTrue(factory.containsBeanDefinition("factoryMethodBean"), "beans without a class name are left alone");
     }
 }
