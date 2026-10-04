@@ -25,9 +25,11 @@ class ReferencePostgresTest {
     @BeforeAll static void migrate() throws Exception {
         try(var c=DriverManager.getConnection(db.getJdbcUrl(),db.getUsername(),db.getPassword());var s=c.createStatement()) { s.execute("create role idax_app; create role idax_admin"); }
         Flyway.configure().dataSource(db.getJdbcUrl(),db.getUsername(),db.getPassword()).schemas("stir").locations("classpath:db/migration-stir").load().migrate();
+        IdaxCoreMembershipFixture.install(db);
     }
     @BeforeEach void setup() throws Exception {
         connection=DriverManager.getConnection(db.getJdbcUrl(),db.getUsername(),db.getPassword());connection.setAutoCommit(false);
+        IdaxCoreMembershipFixture.member(connection,tenant,userId,"owner");
         jdbc=new JdbcTemplate(new SingleConnectionDataSource(connection,true));
         jdbc.execute("set local role idax_app"); jdbc.queryForObject("select set_config('app.tenant_id',?,true)",String.class,tenant.toString());
         TenantContext.set(new TenantContext(tenant,null,userId,"test",TenantContext.DbRole.IDAX_APP));
@@ -108,7 +110,7 @@ class ReferencePostgresTest {
             tenant,UUID.fromString((String)result.get("id")));
         assertTrue(manifest.contains("FINAL_INTEGRITY_FINDING:RELATED_PARTICIPANT_CLUSTER"));
     }
-    @Test void signalCanReachFinalThroughTheRealDecideFlowWithoutDeletingTheRawObservation() {
+    @Test void signalCanReachFinalThroughTheRealDecideFlowWithoutDeletingTheRawObservation() throws Exception {
         // A FINAL decision only changes tomorrow's-or-later eligibility (dailyCutPreventsLiveDifferencing);
         // finalIntegrityFindingChangesEligibilityWithoutRewritingRawAgreement below already proves that
         // effect. This test proves the real signal()->UNDER_REVIEW->FINAL transition chain itself -
@@ -124,13 +126,13 @@ class ReferencePostgresTest {
         UUID caseId=(UUID)signal.get("id");
         integrity.decide(user,caseId,new MarketIntegrityService.DecisionRequest("UNDER_REVIEW","Examining"));
         assertThrows(Exception.class,()->integrity.decide(user,caseId,new MarketIntegrityService.DecisionRequest("FINAL","Self approval")));
-        CurrentUser reviewer=mock(CurrentUser.class);when(reviewer.getUserId()).thenReturn(UUID.randomUUID());
+        UUID reviewerId=UUID.randomUUID();IdaxCoreMembershipFixture.member(connection,tenant,reviewerId,"admin");CurrentUser reviewer=mock(CurrentUser.class);when(reviewer.getUserId()).thenReturn(reviewerId);
         var finalDecision=integrity.decide(reviewer,caseId,new MarketIntegrityService.DecisionRequest("FINAL","Confirmed concentration"));
         assertEquals("FINAL",finalDecision.get("status"));
         assertEquals(3,integrity.history(caseId).size());
         assertEquals(1,jdbc.queryForObject("select count(*) from stir.reference_observation where tenant_id=? and id=?",Integer.class,tenant,observation));
     }
-    @Test void anomalyMustBeReviewedAndCanBeDismissedWithoutExcludingTheAgreement() {
+    @Test void anomalyMustBeReviewedAndCanBeDismissedWithoutExcludingTheAgreement() throws Exception {
         UUID id=definition();var d=service.definition(id);UUID source=UUID.randomUUID();
         service.record(id,"AGREEMENT",source,UUID.randomUUID(),UUID.randomUUID(),BigDecimal.TEN,
             BigDecimal.ONE,"loaf",(String)d.get("unit_ref"),true,Instant.now().minus(Duration.ofDays(1)));
@@ -143,7 +145,7 @@ class ReferencePostgresTest {
         assertThrows(Exception.class,()->integrity.decide(user,caseId,new MarketIntegrityService.DecisionRequest("FINAL","Premature")));
         integrity.decide(user,caseId,new MarketIntegrityService.DecisionRequest("UNDER_REVIEW","Examining context"));
         assertThrows(Exception.class,()->integrity.decide(user,caseId,new MarketIntegrityService.DecisionRequest("FINAL","Self approval")));
-        CurrentUser reviewer=mock(CurrentUser.class);when(reviewer.getUserId()).thenReturn(UUID.randomUUID());
+        UUID reviewerId=UUID.randomUUID();IdaxCoreMembershipFixture.member(connection,tenant,reviewerId,"admin");CurrentUser reviewer=mock(CurrentUser.class);when(reviewer.getUserId()).thenReturn(reviewerId);
         assertEquals("DISMISSED",integrity.decide(reviewer,caseId,new MarketIntegrityService.DecisionRequest("DISMISSED","No finding")).get("status"));
         assertEquals(3,integrity.history(caseId).size());
         assertEquals(1,jdbc.queryForObject("select count(*) from stir.reference_observation where tenant_id=? and id=?",Integer.class,tenant,observation));

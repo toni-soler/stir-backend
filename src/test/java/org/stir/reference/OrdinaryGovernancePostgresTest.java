@@ -32,9 +32,11 @@ class OrdinaryGovernancePostgresTest {
     @BeforeAll static void migrate() throws Exception {
         try(var c=DriverManager.getConnection(db.getJdbcUrl(),db.getUsername(),db.getPassword());var s=c.createStatement()) { s.execute("create role idax_app; create role idax_admin"); }
         Flyway.configure().dataSource(db.getJdbcUrl(),db.getUsername(),db.getPassword()).schemas("stir").locations("classpath:db/migration-stir").load().migrate();
+        IdaxCoreMembershipFixture.install(db);
     }
     @BeforeEach void setup() throws Exception {
         connection=DriverManager.getConnection(db.getJdbcUrl(),db.getUsername(),db.getPassword());connection.setAutoCommit(false);
+        IdaxCoreMembershipFixture.member(connection,tenant,userId,"owner");
         jdbc=new JdbcTemplate(new SingleConnectionDataSource(connection,true));
         jdbc.execute("set local role idax_app"); jdbc.queryForObject("select set_config('app.tenant_id',?,true)",String.class,tenant.toString());
         TenantContext.set(new TenantContext(tenant,null,userId,"test",TenantContext.DbRole.IDAX_APP));
@@ -128,7 +130,7 @@ class OrdinaryGovernancePostgresTest {
         governance.setEnabled(proposer,community,true);
         UUID id=definition(); UUID rp=referenceProposal(id);
         UUID stranger=UUID.randomUUID();
-        assertThrows(ResponseStatusException.class,()->governance.proposePublishReference(as(stranger),id,rp));
+        assertThrows(org.springframework.security.access.AccessDeniedException.class,()->governance.proposePublishReference(as(stranger),id,rp));
         UUID proposalId=UUID.fromString(governance.proposePublishReference(proposer,id,rp).get("id").toString());
         assertThrows(ResponseStatusException.class,()->governance.vote(as(stranger),proposalId,"APPROVE"));
     }
@@ -169,7 +171,7 @@ class OrdinaryGovernancePostgresTest {
         governance.setEnabled(proposer,community,true);
         UUID id=definition(); UUID rp=referenceProposal(id);
         UUID proposalId=UUID.fromString(governance.proposePublishReference(proposer,id,rp).get("id").toString());
-        assertThrows(AccessDeniedException.class,()->governance.vote(superadmin,proposalId,"APPROVE"));
+        assertThrows(org.springframework.web.server.ResponseStatusException.class,()->governance.vote(superadmin,proposalId,"APPROVE"));
         governance.vote(as(m1),proposalId,"APPROVE"); governance.vote(as(m2),proposalId,"APPROVE"); governance.vote(as(m3),proposalId,"APPROVE");
         assertThrows(AccessDeniedException.class,()->governance.execute(superadmin,proposalId));
     }

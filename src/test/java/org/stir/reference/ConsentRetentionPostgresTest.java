@@ -33,9 +33,11 @@ class ConsentRetentionPostgresTest {
     @BeforeAll static void migrate() throws Exception {
         try(var c=DriverManager.getConnection(db.getJdbcUrl(),db.getUsername(),db.getPassword());var s=c.createStatement()) { s.execute("create role idax_app; create role idax_admin"); }
         Flyway.configure().dataSource(db.getJdbcUrl(),db.getUsername(),db.getPassword()).schemas("stir").locations("classpath:db/migration-stir").load().migrate();
+        IdaxCoreMembershipFixture.install(db);
     }
     @BeforeEach void setup() throws Exception {
         connection=DriverManager.getConnection(db.getJdbcUrl(),db.getUsername(),db.getPassword());connection.setAutoCommit(false);
+        IdaxCoreMembershipFixture.member(connection,tenant,userId,"owner");
         jdbc=new JdbcTemplate(new SingleConnectionDataSource(connection,true));
         jdbc.execute("set local role idax_app"); jdbc.queryForObject("select set_config('app.tenant_id',?,true)",String.class,tenant.toString());
         TenantContext.set(new TenantContext(tenant,null,userId,"test",TenantContext.DbRole.IDAX_APP));

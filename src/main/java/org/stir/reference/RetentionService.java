@@ -45,7 +45,7 @@ public class RetentionService {
         return rows.getFirst();
     }
     public Map<String,Object> setPolicy(CurrentUser user,UUID communityId,PolicyRequest r) {
-        ReferenceService.requireCommunityAuthority(user);
+        ReferenceService.requireCommunityAuthority(db,user,communityId);
         references.requireDirectMutationAllowed(communityId);
         return setPolicyDirect(user,communityId,r);
     }
@@ -103,7 +103,7 @@ public class RetentionService {
      * market-integrity hold. Never automatic, never silent, never reversible - and it never touches
      * any other column, any Agreement, or any already-cached reference_snapshot. */
     public Map<String,Object> anonymize(CurrentUser user,UUID observationId,String reason) {
-        ReferenceService.requireCommunityAuthority(user);
+        ReferenceService.requireCommunityAuthority(db,user,null);
         var obs=one("select * from stir.reference_observation where tenant_id=? and id=?",tenant(),observationId);
         var definition=references.definition((UUID)obs.get("definition_id"));
         references.requireDirectMutationAllowed((UUID)definition.get("community_id"));
