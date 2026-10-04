@@ -171,15 +171,12 @@ class GovernedStateVerifierBoundaryPostgresTest {
     }
 
     @Test void ordinaryRuntimeCannotAssumeTheVerifierRole() throws SQLException {
-        var sp = superuser.setSavepoint();
-        try {
-            asRole("idax_backend", TENANT.toString());
-            try (var s = superuser.createStatement()) {
-                SQLException e = assertThrows(SQLException.class, () -> s.execute("set local role idax_governed_verifier"));
-                assertEquals("42501", e.getSQLState());
-            }
-        } finally {
-            superuser.rollback(sp);
+        try (Connection asBackend = DriverManager.getConnection(db.getJdbcUrl(), "idax_backend", "x");
+             var s = asBackend.createStatement()) {
+            asBackend.setAutoCommit(false);
+            SQLException e = assertThrows(SQLException.class, () -> s.execute("set local role idax_governed_verifier"),
+                "a session authenticated as idax_backend must not be able to assume the verifier role");
+            assertEquals("42501", e.getSQLState());
         }
     }
 }

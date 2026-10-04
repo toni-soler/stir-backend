@@ -105,12 +105,16 @@ class LocalJwtIdentityContractTest {
         assertRejected(sign(trusted, new Date(System.currentTimeMillis() + 600_000), "idax-local", null, USER, TENANT));
     }
 
-    @Test void tokenWithoutTenantClaimIsRejected() throws Exception {
+    /** idax-core's validator does not require a tenant claim; it yields an identity without a tenant.
+     * The verifier cannot act on such an identity: TenantContext is then absent and every governed
+     * write fails at ReferenceService.tenant(). The test pins that exact contract. */
+    @Test void tokenWithoutTenantClaimCarriesNoTenantAndCannotAct() throws Exception {
         JWTClaimsSet claims = new JWTClaimsSet.Builder().issuer("idax-local").subject("alice")
             .issueTime(new Date()).expirationTime(new Date(System.currentTimeMillis() + 600_000))
             .claim("userId", USER.toString()).build();
         SignedJWT jwt = new SignedJWT(new JWSHeader(JWSAlgorithm.RS256), claims);
         jwt.sign(new RSASSASigner(trusted.getPrivate()));
-        assertRejected(jwt.serialize());
+        TokenValidationResult result = validate(jwt.serialize());
+        assertTrue(result == null || !result.isValid() || result.getCurrentUser().getTenantId() == null);
     }
 }

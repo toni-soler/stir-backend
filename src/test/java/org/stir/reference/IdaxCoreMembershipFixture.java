@@ -20,6 +20,9 @@ final class IdaxCoreMembershipFixture {
             s.execute("create or replace function idax_core.tenant_match(p uuid) returns boolean language sql stable as $$ select p::text = current_setting('app.tenant_id', true) $$");
             s.execute("create table if not exists idax_core.app_user (user_id uuid primary key, is_active boolean not null default true)");
             s.execute("create table if not exists idax_core.tenant_user (tenant_id uuid not null, user_id uuid not null references idax_core.app_user(user_id), role varchar(30) not null default 'user', created_at timestamptz not null default now(), primary key(tenant_id,user_id))");
+            s.execute("alter table idax_core.tenant_user enable row level security");
+            s.execute("create policy p_tenant_user_app on idax_core.tenant_user for all to idax_app using (idax_core.tenant_match(tenant_id)) with check (idax_core.tenant_match(tenant_id))");
+            s.execute("create policy p_tenant_user_admin on idax_core.tenant_user for all to idax_admin using (true) with check (true)");
             s.execute("grant usage on schema idax_core to idax_app, idax_admin");
             s.execute("grant select on idax_core.app_user, idax_core.tenant_user, idax_core.tenant to idax_app, idax_admin");
         }

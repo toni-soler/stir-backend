@@ -24,6 +24,8 @@ INSERT INTO _governed_tables VALUES
   ('constitutional_credential_history'), ('constitutional_proposal'), ('constitutional_signature'),
   ('market_governance_event'), ('constitutional_webauthn_credential'), ('constitutional_webauthn_challenge');
 
+GRANT USAGE ON SCHEMA stir TO idax_governed_verifier;
+
 -- 1. Ordinary runtime roles lose every write, table-level and column-level.
 DO $$
 DECLARE t record; c record; r record;
