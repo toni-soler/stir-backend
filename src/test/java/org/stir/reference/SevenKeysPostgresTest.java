@@ -163,6 +163,7 @@ class SevenKeysPostgresTest {
         bootstrap();UUID p=proposal("minimumParticipantFloor",10);
         for(int i=1;i<=7;i++) signProposal(p,i);
         service.activate(p,noExecution());
+        jdbc.execute("set local role idax_app");
         var refs=new ReferenceService(jdbc,new ParticipantIndependenceService(jdbc,mock(OstrisClient.class)));
         UUID definition=(UUID)refs.create(user,new ReferenceController.DefinitionRequest("Service","one hour",Map.of(),
             java.math.BigDecimal.ONE,"hour")).get("id");
@@ -219,6 +220,7 @@ class SevenKeysPostgresTest {
     }
     @Test void forcedRlsAndHistoryPrivacyAcrossTenants() throws Exception {
         bootstrap();UUID other=UUID.randomUUID();
+        jdbc.execute("set local role idax_admin");
         jdbc.queryForObject("select set_config('app.tenant_id',?,true)",String.class,other.toString());
         for(String table:List.of("constitutional_authority","constitutional_seat","constitutional_proposal","constitutional_signature",
             "market_governance_event","market_constitution","constitutional_credential_history",

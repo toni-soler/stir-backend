@@ -48,6 +48,7 @@ class WebAuthnSevenKeysPostgresTest {
     @BeforeEach void setup() throws Exception {
         connection=DriverManager.getConnection(postgres.getJdbcUrl(),postgres.getUsername(),postgres.getPassword());
         connection.setAutoCommit(false); jdbc=new JdbcTemplate(new SingleConnectionDataSource(connection,true));
+        jdbc.update("insert into stir.marketplace_economic_binding values (?,?,?,now())",tenant,community,UUID.randomUUID());
         jdbc.execute("set local role idax_governed_verifier");
         jdbc.queryForObject("select set_config('app.tenant_id',?,true)",String.class,tenant.toString());
         TenantContext.set(new TenantContext(tenant,null,UUID.randomUUID(),"test",TenantContext.DbRole.IDAX_APP));
@@ -55,7 +56,6 @@ class WebAuthnSevenKeysPostgresTest {
         webauthn=new WebAuthnCredentialService(jdbc);
         webauthn.rpId=RP_ID; webauthn.rpName="STIR Test"; webauthn.allowedOriginsCsv=ORIGIN;
         service=new SevenKeysService(jdbc,webauthn);
-        jdbc.update("insert into stir.marketplace_economic_binding values (?,?,?,now())",tenant,community,UUID.randomUUID());
         for(int i=0;i<6;i++) { edKeys[i]=edKey();credentials[i]=UUID.randomUUID();controllers[i]=UUID.randomUUID(); }
         credentials[6]=UUID.randomUUID(); controllers[6]=UUID.randomUUID();
         guardian=edKey();
