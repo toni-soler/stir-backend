@@ -16,10 +16,12 @@ final class IdaxCoreMembershipFixture {
         try (Connection c = DriverManager.getConnection(db.getJdbcUrl(), db.getUsername(), db.getPassword());
              var s = c.createStatement()) {
             s.execute("create schema if not exists idax_core");
+            s.execute("create table if not exists idax_core.tenant (tenant_id uuid primary key, status text not null default 'active')");
+            s.execute("create or replace function idax_core.tenant_match(p uuid) returns boolean language sql stable as $$ select p::text = current_setting('app.tenant_id', true) $$");
             s.execute("create table if not exists idax_core.app_user (user_id uuid primary key, is_active boolean not null default true)");
             s.execute("create table if not exists idax_core.tenant_user (tenant_id uuid not null, user_id uuid not null references idax_core.app_user(user_id), role varchar(30) not null default 'user', created_at timestamptz not null default now(), primary key(tenant_id,user_id))");
             s.execute("grant usage on schema idax_core to idax_app, idax_admin");
-            s.execute("grant select on idax_core.app_user, idax_core.tenant_user to idax_app, idax_admin");
+            s.execute("grant select on idax_core.app_user, idax_core.tenant_user, idax_core.tenant to idax_app, idax_admin");
         }
     }
 

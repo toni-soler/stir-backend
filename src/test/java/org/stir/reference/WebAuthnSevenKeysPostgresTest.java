@@ -41,14 +41,14 @@ class WebAuthnSevenKeysPostgresTest {
         try(var c=DriverManager.getConnection(postgres.getJdbcUrl(),postgres.getUsername(),postgres.getPassword());var s=c.createStatement()) {
             s.execute("create role idax_app; create role idax_admin");
         }
+        IdaxCoreMembershipFixture.install(postgres);
         Flyway.configure().dataSource(postgres.getJdbcUrl(),postgres.getUsername(),postgres.getPassword())
             .schemas("stir").locations("classpath:db/migration-stir").load().migrate();
-        IdaxCoreMembershipFixture.install(postgres);
     }
     @BeforeEach void setup() throws Exception {
         connection=DriverManager.getConnection(postgres.getJdbcUrl(),postgres.getUsername(),postgres.getPassword());
         connection.setAutoCommit(false); jdbc=new JdbcTemplate(new SingleConnectionDataSource(connection,true));
-        jdbc.execute("set local role idax_app");
+        jdbc.execute("set local role idax_governed_verifier");
         jdbc.queryForObject("select set_config('app.tenant_id',?,true)",String.class,tenant.toString());
         TenantContext.set(new TenantContext(tenant,null,UUID.randomUUID(),"test",TenantContext.DbRole.IDAX_APP));
         user=mock(CurrentUser.class); UUID actorId=UUID.randomUUID(); when(user.getUserId()).thenReturn(actorId); IdaxCoreMembershipFixture.member(connection,tenant,actorId,"owner");
