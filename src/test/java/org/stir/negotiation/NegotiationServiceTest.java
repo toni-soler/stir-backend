@@ -13,6 +13,7 @@ import org.stir.listing.ListingRepository;
 import org.stir.notification.NotificationService;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.*;
 
 /** In-memory fake repositories: realistic enough to exercise the real state machine
@@ -24,7 +25,7 @@ class NegotiationServiceTest {
     final Map<UUID,Agreement> agreementByNegotiation=new HashMap<>();
 
     ListingRepository listingRepository; NegotiationRepository negotiationRepository; OfferRepository offerRepository;
-    AgreementRepository agreementRepository; AgreementSnapshotRepository snapshotRepository;
+    AgreementRepository agreementRepository; AgreementSnapshotRepository snapshotRepository; org.stir.listing.ListingRevisionRepository revisionRepository;
     NegotiationService service; Listing listing; CurrentUser initiatorUser, ownerUser, strangerUser;
 
     @BeforeEach void setup() {
@@ -33,12 +34,15 @@ class NegotiationServiceTest {
         offerRepository=mock(OfferRepository.class);
         agreementRepository=mock(AgreementRepository.class);
         snapshotRepository=mock(AgreementSnapshotRepository.class);
+        revisionRepository=mock(org.stir.listing.ListingRevisionRepository.class);
         service=new NegotiationService(negotiationRepository,offerRepository,agreementRepository,listingRepository,
-            new AgreementSnapshotService(snapshotRepository), mock(NotificationService.class), mock(org.stir.reference.ReferenceAcceptanceAdapter.class));
+            new AgreementSnapshotService(snapshotRepository), mock(NotificationService.class), mock(org.stir.reference.ReferenceAcceptanceAdapter.class),
+            revisionRepository);
 
         listing=new Listing(); listing.id=UUID.randomUUID(); listing.tenantId=tenant; listing.ownerId=owner;
         listing.status="ACTIVE"; listing.direction="OFFER"; listing.version=0;
         when(listingRepository.findByIdAndTenantId(listing.id,tenant)).thenReturn(Optional.of(listing));
+        when(listingRepository.lockForShare(listing.id,tenant)).thenReturn(Optional.of(listing));
 
         initiatorUser=mock(CurrentUser.class); when(initiatorUser.getUserId()).thenReturn(initiator);
         ownerUser=mock(CurrentUser.class); when(ownerUser.getUserId()).thenReturn(owner);
@@ -155,6 +159,64 @@ class NegotiationServiceTest {
         var refreshed=negotiationStore.get(negotiation.id);
         assertThrows(ResponseStatusException.class,()->service.counter(initiatorUser,refreshed.id,offer("x"),refreshed.version));
         assertThrows(ResponseStatusException.class,()->service.accept(initiatorUser,refreshed.id,refreshed.lastOfferId,refreshed.version));
+    }
+    // --- Economic direction is part of what is accepted (NEGOTIATION_EXECUTION_INTEGRITY.md) ---
+    @Test void negotiationTellsWhoPaysWhomForBothDirections() {
+        var offered=service.open(initiatorUser,listing.id,offer("buy"));
+        assertEquals("OFFER",offered.listingDirection()); assertEquals(initiator,offered.payerUserId()); assertEquals(owner,offered.payeeUserId());
+        listing.direction="WANTED"; negotiationStore.clear();
+        var wanted=service.open(initiatorUser,listing.id,offer("provide"));
+        assertEquals(owner,wanted.payerUserId()); assertEquals(initiator,wanted.payeeUserId());
+    }
+    @Test void acceptRefusesWhenTheListingDirectionChangedAfterTheNegotiationStarted() {
+        listing.direction="WANTED";
+        var negotiation=openNegotiation();
+        var opened=new org.stir.listing.ListingRevision(); opened.direction="WANTED";
+        when(revisionRepository.findFirstByTenantIdAndListingIdAndCreatedAtLessThanEqualOrderByRevisionNumberDesc(tenant,listing.id,negotiation.createdAt))
+            .thenReturn(Optional.of(opened));
+        listing.direction="OFFER";   // flipped behind the counterparty's back (legacy data)
+        var error=assertThrows(ResponseStatusException.class,()->service.accept(ownerUser,negotiation.id,negotiation.lastOfferId,negotiation.version));
+        assertEquals(409,error.getStatusCode().value());
+        assertTrue(agreementByNegotiation.isEmpty());
+    }
+    @Test void acceptBoundToReviewedPartiesRefusesOthersAndFreezesExactlyThose() {
+        var negotiation=openNegotiation();
+        var error=assertThrows(ResponseStatusException.class,()->service.accept(ownerUser,negotiation.id,negotiation.lastOfferId,negotiation.version,false,owner,initiator));
+        assertEquals(409,error.getStatusCode().value());
+        assertTrue(agreementByNegotiation.isEmpty());
+        var agreement=service.accept(ownerUser,negotiation.id,negotiation.lastOfferId,negotiation.version,false,initiator,owner);
+        assertEquals(initiator,agreement.payerUserId()); assertEquals(owner,agreement.payeeUserId());
+        assertTrue(agreement.snapshot().canonicalJson().contains("\"payerUserId\":\""+initiator+"\""));
+    }
+    @Test void acceptingANonEconomicOfferExpectsNoPayer() {
+        var detail=service.open(initiatorUser,listing.id,new OfferRequest("help me move",null,null,null,null,null));
+        var negotiation=negotiationStore.get(detail.id());
+        assertThrows(ResponseStatusException.class,()->service.accept(ownerUser,negotiation.id,negotiation.lastOfferId,negotiation.version,false,initiator,owner));
+        assertNull(service.accept(ownerUser,negotiation.id,negotiation.lastOfferId,negotiation.version).payerUserId());
+    }
+
+    // --- Lost races become 409; anything else stays an error ---
+    static org.springframework.dao.DataIntegrityViolationException violation(String constraint) {
+        return new org.springframework.dao.DataIntegrityViolationException("could not execute statement",
+            new java.sql.SQLException("ERROR: duplicate key value violates unique constraint \""+constraint+"\"","23505"));
+    }
+    @Test void aCounterofferThatLostTheRaceForItsSequenceNumberIsAConflict() {
+        var negotiation=openNegotiation();
+        doThrow(violation("offer_negotiation_id_sequence_number_key")).when(offerRepository).saveAndFlush(argThat(o->o!=null && o.sequenceNumber==2));
+        var error=assertThrows(ResponseStatusException.class,()->service.counter(ownerUser,negotiation.id,offer("18kg"),negotiation.version));
+        assertEquals(409,error.getStatusCode().value());
+    }
+    @Test void aSecondSimultaneousOpenIsAConflict() {
+        doThrow(violation("negotiation_one_open_thread")).when(negotiationRepository).saveAndFlush(any());
+        assertEquals(409,assertThrows(ResponseStatusException.class,()->service.open(initiatorUser,listing.id,offer("x"))).getStatusCode().value());
+    }
+    @Test void aLostOptimisticRaceIsAConflictButAnUnknownConstraintIsNot() {
+        var negotiation=openNegotiation();
+        doThrow(new org.springframework.orm.ObjectOptimisticLockingFailureException(Negotiation.class,negotiation.id)).when(negotiationRepository).saveAndFlush(any());
+        assertEquals(409,assertThrows(ResponseStatusException.class,()->service.decline(ownerUser,negotiation.id,negotiation.version)).getStatusCode().value());
+        negotiation.status="OPEN";   // the failed attempt above was rolled back
+        doThrow(violation("some_other_constraint")).when(negotiationRepository).saveAndFlush(any());
+        assertThrows(org.springframework.dao.DataIntegrityViolationException.class,()->service.decline(ownerUser,negotiation.id,negotiation.version));
     }
     @Test void missingTenantFailsClosed() {
         TenantContext.clear();
