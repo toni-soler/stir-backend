@@ -188,11 +188,12 @@ class NegotiationServiceTest {
         assertEquals(initiator,agreement.payerUserId()); assertEquals(owner,agreement.payeeUserId());
         assertTrue(agreement.snapshot().canonicalJson().contains("\"payerUserId\":\""+initiator+"\""));
     }
-    @Test void acceptingANonEconomicOfferExpectsNoPayer() {
+    @Test void aNonEconomicOfferChecksTheSameRolesButFreezesNoPayer() {
         var detail=service.open(initiatorUser,listing.id,new OfferRequest("help me move",null,null,null,null,null));
         var negotiation=negotiationStore.get(detail.id());
-        assertThrows(ResponseStatusException.class,()->service.accept(ownerUser,negotiation.id,negotiation.lastOfferId,negotiation.version,false,initiator,owner));
-        assertNull(service.accept(ownerUser,negotiation.id,negotiation.lastOfferId,negotiation.version).payerUserId());
+        assertThrows(ResponseStatusException.class,()->service.accept(ownerUser,negotiation.id,negotiation.lastOfferId,negotiation.version,false,owner,initiator));
+        var agreement=service.accept(ownerUser,negotiation.id,negotiation.lastOfferId,negotiation.version,false,initiator,owner);
+        assertNull(agreement.payerUserId()); assertEquals("NOT_APPLICABLE",agreement.economicPhase());
     }
 
     // --- Lost races become 409; anything else stays an error ---

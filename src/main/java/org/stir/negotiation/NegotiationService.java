@@ -157,10 +157,11 @@ public class NegotiationService {
         var listing=lockedActiveListing(tenant,negotiation.listingId);
         var parties=parties(negotiation,listing);
         boolean economic=head.proposedAmount!=null;
-        if(expectedPayer!=null || expectedPayee!=null) {
-            if(!java.util.Objects.equals(expectedPayer,economic?parties.payer():null) || !java.util.Objects.equals(expectedPayee,economic?parties.payee():null))
-                throw new ResponseStatusException(CONFLICT,"Who pays and who receives is not what you reviewed; reload before accepting");
-        }
+        // The roles are those NegotiationDetail shows; the Agreement freezes them as payer/payee only
+        // when the accepted offer carries an amount.
+        if((expectedPayer!=null || expectedPayee!=null)
+                && (!parties.payer().equals(expectedPayer) || !parties.payee().equals(expectedPayee)))
+            throw new ResponseStatusException(CONFLICT,"Who pays and who receives is not what you reviewed; reload before accepting");
         head.status="ACCEPTED"; offers.saveAndFlush(head);
         negotiation.status="ACCEPTED"; negotiation.updatedAt=Instant.now();
         var closing=negotiation;
