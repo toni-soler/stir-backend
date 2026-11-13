@@ -110,7 +110,21 @@ class TradeServiceTest {
         trade.payerAccountId = payerAccount; trade.payeeAccountId = payeeAccount; trade.payerUserId = payer; trade.payeeUserId = payee;
         trade.amount = new BigInteger("900"); trade.executionState = "AWAITING_SIGNATURES"; trade.contractualMetadataDigest = snapshot.digestSha256;
         when(trades.findByTenantIdAndAgreementId(tenant, agreement.id)).thenReturn(Optional.of(trade));
+        when(ostris.transaction(trade.transactionId)).thenReturn(status(trade, "PROPOSED", null, null, null));
         return trade;
+    }
+    /** osTRIS's own view of this Agreement's transaction: payer -900, payee +900, this Agreement's digest. */
+    OstrisClient.TransactionStatus status(Trade trade, String state, Long sequence, String protocolDigest, Instant committedAt) {
+        return status(trade.transactionId, state, sequence, protocolDigest, committedAt, snapshot.digestSha256, unit,
+            payerAccount, "-900", payeeAccount, "900");
+    }
+    OstrisClient.TransactionStatus status(UUID transaction, String state, Long sequence, String protocolDigest, Instant committedAt,
+            String digest, UUID unitId, UUID debit, String debitAmount, UUID credit, String creditAmount) {
+        String payload = "{\"communityId\":\"" + community + "\",\"contractualMetadataDigest\":\"" + digest + "\",\"entries\":["
+            + "{\"accountId\":\"" + debit + "\",\"amount\":\"" + debitAmount + "\"},{\"accountId\":\"" + credit + "\",\"amount\":\"" + creditAmount + "\"}],"
+            + "\"purpose\":\"EXCHANGE\",\"transactionId\":\"" + transaction + "\",\"unitId\":\"" + unitId + "\"}";
+        return new OstrisClient.TransactionStatus(transaction, community, unitId, "EXCHANGE", "OSTRIS-CORE-JCS-1", "0.1", payload, "auth-digest",
+            state, sequence, protocolDigest, committedAt, List.of(debit, credit));
     }
 
     @Test void authorizeRelaysToOstrisUsingTheCallersOwnAccountAndTheCredentialTheCallerActuallySignedWith() {
@@ -120,8 +134,7 @@ class TradeServiceTest {
         // which would make a later device's perfectly valid signature always fail osTRIS's check.
         var secondDeviceCredential = UUID.randomUUID();
         var trade = tradeAwaitingSignatures();
-        when(ostris.transaction(trade.transactionId)).thenReturn(new OstrisClient.TransactionStatus(
-            trade.transactionId, community, unit, "EXCHANGE", "OSTRIS-CORE-JCS-1", "0.1", "{}", "digest", "PROPOSED", null, null, null, List.of(payerAccount)));
+        when(ostris.transaction(trade.transactionId)).thenReturn(status(trade, "PROPOSED", null, null, null));
         service.authorize(payerUser, agreement.id, secondDeviceCredential, "sig-bytes");
         verify(ostris).authorize(trade.transactionId, payerAccount, secondDeviceCredential, "sig-bytes");
     }
@@ -177,9 +190,7 @@ class TradeServiceTest {
         assertEquals(503, error.getStatusCode().value());
         assertEquals("AWAITING_SIGNATURES", trade.executionState);
         var committedAt = Instant.now();
-        when(ostris.transaction(trade.transactionId)).thenReturn(new OstrisClient.TransactionStatus(
-            trade.transactionId, community, unit, "EXCHANGE", "OSTRIS-CORE-JCS-1", "0.1", "{}", "digest",
-            "COMMITTED", 8L, "protocol-digest", committedAt, List.of(payerAccount, payeeAccount)));
+        when(ostris.transaction(trade.transactionId)).thenReturn(status(trade, "COMMITTED", 8L, "protocol-digest", committedAt));
         assertEquals("COMMITTED", service.sync(payerUser, agreement.id).executionState());
         assertEquals("COMMITTED", service.commit(payerUser, agreement.id).executionState());
         verify(ostris, times(1)).commit(trade.transactionId);
@@ -199,9 +210,7 @@ class TradeServiceTest {
     @Test void legacyFalseRejectionIsReconciledFromOstrisBeforeRetry() {
         var trade = tradeAwaitingSignatures(); trade.executionState = "REJECTED";
         agreement.economicPhase = "REJECTED";
-        when(ostris.transaction(trade.transactionId)).thenReturn(new OstrisClient.TransactionStatus(
-            trade.transactionId, community, unit, "EXCHANGE", "OSTRIS-CORE-JCS-1", "0.1", "{}", "digest",
-            "PROPOSED", null, null, null, List.of(payerAccount, payeeAccount)));
+        when(ostris.transaction(trade.transactionId)).thenReturn(status(trade, "PROPOSED", null, null, null));
         when(ostris.commit(trade.transactionId)).thenReturn(new OstrisClient.CommitReceipt(trade.transactionId, 10L, "protocol-digest", Instant.now()));
         assertEquals("COMMITTED", service.commit(payerUser, agreement.id).executionState());
         verify(ostris, times(1)).transaction(trade.transactionId);
@@ -229,16 +238,65 @@ class TradeServiceTest {
     }
     @Test void syncNeverTrustsClientAndOnlyAdvancesWhenOstrisReportsCommitted() {
         var trade = tradeAwaitingSignatures();
-        when(ostris.transaction(trade.transactionId)).thenReturn(new OstrisClient.TransactionStatus(
-            trade.transactionId, community, unit, "EXCHANGE", "OSTRIS-CORE-JCS-1", "0.1", "{}", "digest", "PROPOSED", null, null, null, List.of(payerAccount, payeeAccount)));
+        when(ostris.transaction(trade.transactionId)).thenReturn(status(trade, "PROPOSED", null, null, null));
         var stillPending = service.sync(payerUser, agreement.id);
         assertEquals("AWAITING_SIGNATURES", stillPending.executionState());
 
-        when(ostris.transaction(trade.transactionId)).thenReturn(new OstrisClient.TransactionStatus(
-            trade.transactionId, community, unit, "EXCHANGE", "OSTRIS-CORE-JCS-1", "0.1", "{}", "digest", "COMMITTED", 5L, "proto-digest", Instant.now(), List.of(payerAccount, payeeAccount)));
+        when(ostris.transaction(trade.transactionId)).thenReturn(status(trade, "COMMITTED", 5L, "proto-digest", Instant.now()));
         var reconciled = service.sync(payerUser, agreement.id);
         assertEquals("COMMITTED", reconciled.executionState());
         assertEquals(5L, reconciled.committedSequence());
         assertEquals("COMMITTED", agreement.economicPhase);
+    }
+
+    // --- Correlation: the osTRIS transaction must be this Agreement's exchange (NEGOTIATION_EXECUTION_INTEGRITY.md) ---
+    private void assertRefusedEverywhere(Trade trade) {
+        String state = trade.executionState, phase = agreement.economicPhase;
+        for (Runnable call : List.<Runnable>of(() -> service.signingPayload(payerUser, agreement.id), () -> service.commit(payeeUser, agreement.id),
+                () -> service.sync(payerUser, agreement.id), () -> service.authorize(payerUser, agreement.id, payerCredential, "sig"))) {
+            var error = assertThrows(ResponseStatusException.class, call::run);
+            assertEquals(409, error.getStatusCode().value());
+            assertTrue(error.getReason().startsWith("EXECUTION_INTENT_MISMATCH"));
+        }
+        verify(ostris, never()).commit(any());
+        verify(ostris, never()).authorize(any(), any(), any(), any());
+        assertEquals(state, trade.executionState); assertEquals(phase, agreement.economicPhase);
+        verify(trades, never()).saveAndFlush(trade);
+    }
+    @Test void anotherAgreementsCommittedTransactionIsNeverAttributedToThisOne() {
+        // stir.trade altered to point at Agreement B's transaction (same parties, same amount).
+        var trade = tradeAwaitingSignatures();
+        when(ostris.transaction(trade.transactionId)).thenReturn(status(trade.transactionId, "COMMITTED", 4L, "p", Instant.now(),
+            "b".repeat(64), unit, payerAccount, "-900", payeeAccount, "900"));
+        assertRefusedEverywhere(trade);
+    }
+    @Test void theSameSubstitutionWithTheTradeRowDigestRewrittenToo() {
+        var trade = tradeAwaitingSignatures(); trade.contractualMetadataDigest = "b".repeat(64);
+        when(ostris.transaction(trade.transactionId)).thenReturn(status(trade.transactionId, "COMMITTED", 4L, "p", Instant.now(),
+            "b".repeat(64), unit, payerAccount, "-900", payeeAccount, "900"));
+        assertRefusedEverywhere(trade);
+    }
+    @Test void aTransactionMovingAnotherAmountDirectionUnitOrAccountIsRefused() {
+        var other = UUID.randomUUID();
+        var trade = tradeAwaitingSignatures();
+        for (var wrong : List.of(
+                status(trade.transactionId, "PROPOSED", null, null, null, snapshot.digestSha256, unit, payerAccount, "-9000", payeeAccount, "9000"),
+                status(trade.transactionId, "PROPOSED", null, null, null, snapshot.digestSha256, unit, payeeAccount, "-900", payerAccount, "900"),
+                status(trade.transactionId, "PROPOSED", null, null, null, snapshot.digestSha256, UUID.randomUUID(), payerAccount, "-900", payeeAccount, "900"),
+                status(trade.transactionId, "PROPOSED", null, null, null, snapshot.digestSha256, unit, payerAccount, "-900", other, "900"),
+                status(UUID.randomUUID(), "PROPOSED", null, null, null, snapshot.digestSha256, unit, payerAccount, "-900", payeeAccount, "900"))) {
+            when(ostris.transaction(trade.transactionId)).thenReturn(wrong);
+            assertRefusedEverywhere(trade);
+        }
+    }
+    @Test void aTradeRowThatNoLongerMatchesTheAgreementIsRefusedEvenIfOsTrisAgreesWithIt() {
+        var trade = tradeAwaitingSignatures(); trade.amount = new BigInteger("9000");
+        assertRefusedEverywhere(trade);
+    }
+    @Test void theMatchingTransactionStillSignsCommitsAndReconcilesNormally() {
+        var trade = tradeAwaitingSignatures();
+        assertNotNull(service.signingPayload(payerUser, agreement.id).authorizationPayload());
+        when(ostris.commit(trade.transactionId)).thenReturn(new OstrisClient.CommitReceipt(trade.transactionId, 11L, "p", Instant.now()));
+        assertEquals("COMMITTED", service.commit(payeeUser, agreement.id).executionState());
     }
 }

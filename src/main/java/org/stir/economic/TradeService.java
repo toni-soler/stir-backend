@@ -6,8 +6,16 @@ import java.math.BigInteger;
 import java.math.RoundingMode;
 import java.security.SecureRandom;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -40,6 +48,10 @@ public class TradeService {
     private final OstrisClient ostris;
     private final NotificationService notifications;
     private final SecureRandom random = new SecureRandom();
+    private static final ObjectMapper JSON = new ObjectMapper();
+    private static final Logger log = LoggerFactory.getLogger(TradeService.class);
+    static final String INTENT_MISMATCH = "EXECUTION_INTENT_MISMATCH: the osTRIS transaction linked to this agreement does not match "
+        + "the agreed exchange; nothing was signed, committed or reported for it. Reconcile it before retrying";
 
     public TradeService(TradeRepository trades, AgreementRepository agreements, OfferRepository offers,
             AgreementSnapshotRepository snapshots, ParticipantEconomicBindingRepository participantBindings,
@@ -81,9 +93,10 @@ public class TradeService {
 
     public SigningPayload signingPayload(CurrentUser user, UUID agreementId) {
         UUID tenant = tenant();
-        partyAgreement(tenant, agreementId, actor(user));
+        var agreement = partyAgreement(tenant, agreementId, actor(user));
         var trade = requireTrade(tenant, agreementId);
         var status = ostris.transaction(trade.transactionId);
+        requireIntent(tenant, agreement, trade, status);
         return new SigningPayload(status.wireFormat(), status.authorizationPayload(), status.authorizationDigest(), status.authorizedAccountIds());
     }
 
@@ -140,6 +153,7 @@ public class TradeService {
         if (!"AWAITING_SIGNATURES".equals(trade.executionState))
             throw new ResponseStatusException(CONFLICT, "This exchange is no longer awaiting signatures (" + trade.executionState + ")");
         requireBinding(tenant, actor, "You");
+        requireIntent(tenant, agreement, trade, ostris.transaction(trade.transactionId));
         UUID myAccount = actor.equals(agreement.payerUserId) ? trade.payerAccountId : trade.payeeAccountId;
         ostris.authorize(trade.transactionId, myAccount, credentialId, signatureBase64url);
         var result = sync(user, agreementId);
@@ -152,11 +166,14 @@ public class TradeService {
         UUID tenant = tenant();
         var agreement = partyAgreement(tenant, agreementId, actor(user));
         var trade = requireTrade(tenant, agreementId);
+        // Even an already-committed trade is re-checked before it is reported as this Agreement's execution.
+        var status = ostris.transaction(trade.transactionId);
+        requireIntent(tenant, agreement, trade, status);
         if ("COMMITTED".equals(trade.executionState)) return TradeView.of(trade);
         // Older STIR versions could mark a still-PROPOSED osTRIS transaction REJECTED after a
         // failed HTTP call. Reconcile that legacy local state before deciding whether to retry.
         if ("REJECTED".equals(trade.executionState)) {
-            sync(user, agreementId);
+            reconcile(agreement, trade, status);
             if ("COMMITTED".equals(trade.executionState)) return TradeView.of(trade);
             if ("REJECTED".equals(trade.executionState))
                 throw new ResponseStatusException(CONFLICT, "osTRIS status does not permit retry");
@@ -200,8 +217,14 @@ public class TradeService {
         UUID tenant = tenant();
         var agreement = partyAgreement(tenant, agreementId, actor(user));
         var trade = requireTrade(tenant, agreementId);
+        var status = ostris.transaction(trade.transactionId);
+        requireIntent(tenant, agreement, trade, status);
+        reconcile(agreement, trade, status);
+        return TradeView.of(trade);
+    }
+
+    private void reconcile(Agreement agreement, Trade trade, OstrisClient.TransactionStatus status) {
         if (!"COMMITTED".equals(trade.executionState)) {
-            var status = ostris.transaction(trade.transactionId);
             if ("COMMITTED".equals(status.status())) {
                 trade.executionState = "COMMITTED"; trade.committedSequence = status.committedSequence();
                 trade.protocolDigest = status.protocolDigest(); trade.committedAt = status.committedAt();
@@ -213,7 +236,55 @@ public class TradeService {
                 agreement.economicPhase = "AWAITING_SIGNATURES"; agreements.saveAndFlush(agreement);
             }
         }
-        return TradeView.of(trade);
+    }
+
+    /**
+     * The osTRIS transaction behind stir.trade must be exactly this Agreement's exchange before STIR
+     * relays a signature, commits, or reports it as executed. The expectation is re-derived from STIR's
+     * own Agreement, accepted Offer, frozen snapshot, marketplace binding and participant bindings -
+     * never from the stir.trade row, which is only a pointer and is what gets compared. osTRIS's own
+     * signatures are not in question here; this closes the correlation between a STIR Agreement and
+     * the osTRIS transaction STIR attributes to it (NEGOTIATION_EXECUTION_INTEGRITY.md).
+     */
+    void requireIntent(UUID tenant, Agreement agreement, Trade trade, OstrisClient.TransactionStatus status) {
+        var problems = new ArrayList<String>();
+        try {
+            var snapshot = snapshots.findByAgreementId(agreement.id).orElse(null);
+            var offer = offers.findById(agreement.offerId).orElse(null);
+            var marketplace = activation.requireMarketplaceBinding(tenant);
+            var payer = participantBindings.findByTenantIdAndUserId(tenant, agreement.payerUserId).orElse(null);
+            var payee = participantBindings.findByTenantIdAndUserId(tenant, agreement.payeeUserId).orElse(null);
+            if (snapshot == null || offer == null || payer == null || payee == null || status == null || status.authorizationPayload() == null) {
+                problems.add("missing agreement, offer, binding or osTRIS transaction");
+            } else {
+                BigInteger amount = toMinorUnits(offer, ostris.unit(marketplace.communityId, marketplace.unitId).scale());
+                JsonNode payload = JSON.readTree(status.authorizationPayload());
+                expect(problems, "transactionId", trade.transactionId.toString(), status.transactionId(), payload.path("transactionId").asText(null));
+                expect(problems, "communityId", marketplace.communityId.toString(), trade.communityId, status.communityId(), payload.path("communityId").asText(null));
+                expect(problems, "unitId", marketplace.unitId.toString(), trade.unitId, status.unitId(), payload.path("unitId").asText(null));
+                expect(problems, "purpose", "EXCHANGE", status.purpose(), payload.path("purpose").asText(null));
+                expect(problems, "contractualMetadataDigest", snapshot.digestSha256, trade.contractualMetadataDigest, payload.path("contractualMetadataDigest").asText(null));
+                expect(problems, "payer", agreement.payerUserId.toString(), trade.payerUserId);
+                expect(problems, "payee", agreement.payeeUserId.toString(), trade.payeeUserId);
+                expect(problems, "payerAccount", payer.accountId.toString(), trade.payerAccountId);
+                expect(problems, "payeeAccount", payee.accountId.toString(), trade.payeeAccountId);
+                expect(problems, "amount", amount.toString(), trade.amount);
+                Map<String, BigInteger> entries = new HashMap<>();
+                for (JsonNode entry : payload.path("entries"))
+                    entries.merge(entry.path("accountId").asText(), new BigInteger(entry.path("amount").asText()), BigInteger::add);
+                if (payload.path("entries").size() != 2 || !entries.equals(Map.of(payer.accountId.toString(), amount.negate(), payee.accountId.toString(), amount)))
+                    problems.add("entries");
+            }
+        } catch (java.io.IOException | NumberFormatException ex) {
+            problems.add("unreadable osTRIS authorization payload");
+        }
+        if (!problems.isEmpty()) {
+            log.warn("Agreement {} / transaction {}: osTRIS execution does not match the agreed exchange: {}", agreement.id, trade.transactionId, problems);
+            throw new ResponseStatusException(CONFLICT, INTENT_MISMATCH);
+        }
+    }
+    private static void expect(List<String> problems, String field, String expected, Object... actual) {
+        for (Object value : actual) if (!Objects.equals(expected, value == null ? null : value.toString())) { problems.add(field); return; }
     }
 
     private BigInteger toMinorUnits(Offer offer, int unitScale) {

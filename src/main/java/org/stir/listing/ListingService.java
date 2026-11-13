@@ -86,9 +86,16 @@ public class ListingService {
         return listing;
     }
     public Listing update(UUID id, CurrentUser user, ListingRequest request) {
-        var listing=owned(id,user);
+        // Locked so that an edit and a negotiation being opened/accepted on this listing never interleave.
+        var listing=listings.lockForUpdate(id,tenant()).orElseThrow(()->new ResponseStatusException(NOT_FOUND,"Listing not found"));
+        if(!listing.ownerId.equals(owner(user))) throw new AccessDeniedException("Only the owner may change this listing");
         if(!"ACTIVE".equals(listing.status)) throw new ResponseStatusException(CONFLICT,"Listing is closed");
-        checkVersion(listing,request.version()); apply(listing,request);
+        checkVersion(listing,request.version());
+        // The direction decides who pays whom (NegotiationService.accept). A counterparty negotiating
+        // right now saw it; it cannot be reversed under them (NEGOTIATION_EXECUTION_INTEGRITY.md).
+        if(!Objects.equals(listing.direction,request.direction()) && hasOpenNegotiations(listing))
+            throw new ResponseStatusException(CONFLICT,"This listing has open negotiations; whether it offers or requests something cannot change until they are accepted or declined");
+        apply(listing,request);
         listing=listings.saveAndFlush(listing);
         // Every edit is a new immutable revision - an earlier LISTING/WANTED observation still
         // points at its own revision, never at the mutable listing row, so editing never rewrites
@@ -100,6 +107,10 @@ public class ListingService {
         var listing=owned(id,user);
         if("CLOSED".equals(listing.status)) return listing;
         checkVersion(listing,version); listing.status="CLOSED"; listing.updatedAt=Instant.now(); return listings.saveAndFlush(listing);
+    }
+    private boolean hasOpenNegotiations(Listing listing) {
+        return Boolean.TRUE.equals(jdbc.queryForObject(
+            "select exists(select 1 from stir.negotiation where tenant_id=? and listing_id=? and status='OPEN')",Boolean.class,listing.tenantId,listing.id));
     }
     private Listing owned(UUID id, CurrentUser user) {
         var listing=entity(id);
