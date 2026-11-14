@@ -12,8 +12,14 @@ public record OfferRequest(
     @Size(max=2000) String terms,
     boolean shareReferenceObservation,
     @Pattern(regexp="[a-z][a-z0-9._-]{2,79}") String externalContractNamespace,
-    @Pattern(regexp="[0-9a-f]{64}") String externalContractDigest
+    @Pattern(regexp="[0-9a-f]{64}") String externalContractDigest,
+    @jakarta.validation.Valid OfferTerms structuredTerms
  ) {
+    public OfferRequest(String message,BigDecimal quantity,String unitLabel,BigDecimal proposedAmount,String proposedUnitRef,String terms,
+            boolean shareReferenceObservation,String externalContractNamespace,String externalContractDigest) {
+        this(message,quantity,unitLabel,proposedAmount,proposedUnitRef,terms,shareReferenceObservation,externalContractNamespace,externalContractDigest,null);
+    }
+    public OfferTerms structuredTermsOrNone() { return structuredTerms==null ? OfferTerms.NONE : structuredTerms; }
     public OfferRequest(String message,BigDecimal quantity,String unitLabel,BigDecimal proposedAmount,String proposedUnitRef,String terms) {
         this(message,quantity,unitLabel,proposedAmount,proposedUnitRef,terms,false,null,null);
     }

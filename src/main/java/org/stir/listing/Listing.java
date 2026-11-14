@@ -26,6 +26,17 @@ public class Listing {
     @Column(name="indicative_unit_label", length=40) public String indicativeUnitLabel;
     @Column(name="indicative_unit_ref", length=60) public String indicativeUnitRef;
     @Column(name="share_reference_observation", nullable=false) public boolean shareReferenceObservation;
+    // What is offered or needed beyond title/description (STRUCTURED_TERMS_AND_NEEDS.md).
+    @Column(name="item_condition", length=20) public String itemCondition;
+    @Column(name="fulfilment_mode", length=20) public String fulfilmentMode;
+    @Column(name="included_items", length=1000) public String includedItems;
+    @Column(name="available_until") public java.time.LocalDate availableUntil;
+    @Column(nullable=false, length=20) public String availability="AVAILABLE";
+    @Column(name="needed_by") public java.time.LocalDate neededBy;
+    @Column(name="flexible_on", length=120) public String flexibleOn;
+    @Column(name="firm_on", length=120) public String firmOn;
+    /** Only for the owner and the people negotiating on this listing; never in search or revisions. */
+    @Column(name="counterpart_note", length=2000) public String counterpartNote;
     @Version public long version;
     @Column(name="created_at", nullable=false) public Instant createdAt;
     @Column(name="updated_at", nullable=false) public Instant updatedAt;
