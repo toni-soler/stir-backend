@@ -16,8 +16,16 @@ public record ListingRequest(
     @PositiveOrZero BigDecimal indicativeQuantity,
     @Size(max=40) String indicativeUnitLabel,
     @Size(max=60) String indicativeUnitRef,
-    boolean shareReferenceObservation
+    boolean shareReferenceObservation,
+    @jakarta.validation.Valid ListingDetails details
 ) {
+    public ListingRequest(String direction,String title,String description,String category,String resourceKind,String location,Long version,
+            java.util.UUID referenceDefinitionId,BigDecimal indicativeAmount,BigDecimal indicativeQuantity,String indicativeUnitLabel,
+            String indicativeUnitRef,boolean shareReferenceObservation) {
+        this(direction,title,description,category,resourceKind,location,version,referenceDefinitionId,indicativeAmount,indicativeQuantity,
+            indicativeUnitLabel,indicativeUnitRef,shareReferenceObservation,null);
+    }
+    public ListingDetails detailsOrNone() { return details==null ? ListingDetails.NONE : details; }
     public ListingRequest(String direction,String title,String description,String category,String resourceKind,String location,Long version) {
         this(direction,title,description,category,resourceKind,location,version,null,null,null,null,null,false);
     }
