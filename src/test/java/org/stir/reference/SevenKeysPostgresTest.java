@@ -28,18 +28,19 @@ class SevenKeysPostgresTest {
         try(var c=DriverManager.getConnection(postgres.getJdbcUrl(),postgres.getUsername(),postgres.getPassword());var s=c.createStatement()) {
             s.execute("create role idax_app; create role idax_admin");
         }
+        IdaxCoreMembershipFixture.install(postgres);
         Flyway.configure().dataSource(postgres.getJdbcUrl(),postgres.getUsername(),postgres.getPassword())
             .schemas("stir").locations("classpath:db/migration-stir").load().migrate();
     }
     @BeforeEach void setup() throws Exception {
         connection=DriverManager.getConnection(postgres.getJdbcUrl(),postgres.getUsername(),postgres.getPassword());
         connection.setAutoCommit(false); jdbc=new JdbcTemplate(new SingleConnectionDataSource(connection,true));
-        jdbc.execute("set local role idax_app");
+        jdbc.update("insert into stir.marketplace_economic_binding values (?,?,?,now())",tenant,community,UUID.randomUUID());
+        jdbc.execute("set local role idax_governed_verifier");
         jdbc.queryForObject("select set_config('app.tenant_id',?,true)",String.class,tenant.toString());
         TenantContext.set(new TenantContext(tenant,null,UUID.randomUUID(),"test",TenantContext.DbRole.IDAX_APP));
-        user=mock(CurrentUser.class); when(user.getUserId()).thenReturn(UUID.randomUUID());
+        user=mock(CurrentUser.class); UUID actorId=UUID.randomUUID(); when(user.getUserId()).thenReturn(actorId); IdaxCoreMembershipFixture.member(connection,tenant,actorId,"owner");
         service=new SevenKeysService(jdbc,new WebAuthnCredentialService(jdbc));
-        jdbc.update("insert into stir.marketplace_economic_binding values (?,?,?,now())",tenant,community,UUID.randomUUID());
         for(int i=0;i<7;i++) { keys[i]=key();credentials[i]=UUID.randomUUID();controllers[i]=UUID.randomUUID(); }
         guardian=key();
     }
@@ -162,6 +163,7 @@ class SevenKeysPostgresTest {
         bootstrap();UUID p=proposal("minimumParticipantFloor",10);
         for(int i=1;i<=7;i++) signProposal(p,i);
         service.activate(p,noExecution());
+        jdbc.execute("set local role idax_app");
         var refs=new ReferenceService(jdbc,new ParticipantIndependenceService(jdbc,mock(OstrisClient.class)));
         UUID definition=(UUID)refs.create(user,new ReferenceController.DefinitionRequest("Service","one hour",Map.of(),
             java.math.BigDecimal.ONE,"hour")).get("id");
@@ -218,6 +220,7 @@ class SevenKeysPostgresTest {
     }
     @Test void forcedRlsAndHistoryPrivacyAcrossTenants() throws Exception {
         bootstrap();UUID other=UUID.randomUUID();
+        jdbc.execute("set local role idax_admin");
         jdbc.queryForObject("select set_config('app.tenant_id',?,true)",String.class,other.toString());
         for(String table:List.of("constitutional_authority","constitutional_seat","constitutional_proposal","constitutional_signature",
             "market_governance_event","market_constitution","constitutional_credential_history",
