@@ -33,5 +33,16 @@ public class DeviceCredentialController {
         service.revokeDevice(user, credentialId);
     }
 
+    @PostMapping("/approval-intent") @PreAuthorize("@permissionService.hasPermission('stir.economic.manage')")
+    public DeviceCredentialService.ApprovalIntent addIntent(@AuthenticationPrincipal CurrentUser user, @RequestBody AddIntentRequest request) {
+        return service.addDeviceIntent(user, request.publicKeyBase64url());
+    }
+
+    @PostMapping("/{credentialId}/revoke/approval-intent") @PreAuthorize("@permissionService.hasPermission('stir.economic.manage')")
+    public DeviceCredentialService.ApprovalIntent revokeIntent(@PathVariable UUID credentialId, @AuthenticationPrincipal CurrentUser user) {
+        return service.revokeDeviceIntent(user, credentialId);
+    }
+
+    public record AddIntentRequest(@NotBlank String publicKeyBase64url) {}
     public record AddDeviceRequest(@NotBlank @Size(max = 80) String label, @NotBlank String publicKeyBase64url) {}
 }

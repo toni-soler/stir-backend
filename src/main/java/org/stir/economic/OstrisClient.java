@@ -43,6 +43,16 @@ public class OstrisClient {
         var tenant = TenantContext.get();
         if (tenant != null && tenant.getTenantId() != null) headers.set("X-Tenant", tenant.getTenantId().toString());
     }
+    // A per-operation approval the caller obtained for one specific osTRIS change (IDAX Core
+    // operation approvals) is relayed untouched, exactly like the bearer token: STIR never mints,
+    // inspects or stores it. osTRIS alone verifies it against the operation it is about to execute
+    // and consumes it once; on any other call it is simply not looked at.
+    static final String OPERATION_APPROVAL_HEADER = "X-Operation-Approval";
+    private void relayOperationApproval(org.springframework.http.HttpHeaders headers) {
+        var attrs = (ServletRequestAttributes) RequestContextHolder.getRequestAttributes();
+        String approval = attrs == null ? null : attrs.getRequest().getHeader(OPERATION_APPROVAL_HEADER);
+        if (approval != null && !approval.isBlank()) headers.set(OPERATION_APPROVAL_HEADER, approval);
+    }
     private <T> T get(String uri, Class<T> type) {
         try {
             return client.get().uri(uri).header("Authorization", currentAuthorizationHeader()).headers(this::applyTenant).retrieve().body(type);
@@ -55,7 +65,7 @@ public class OstrisClient {
     }
     private <T> T post(String uri, Object body, Class<T> type) {
         try {
-            var spec = client.post().uri(uri).header("Authorization", currentAuthorizationHeader()).headers(this::applyTenant).contentType(org.springframework.http.MediaType.APPLICATION_JSON);
+            var spec = client.post().uri(uri).header("Authorization", currentAuthorizationHeader()).headers(this::applyTenant).headers(this::relayOperationApproval).contentType(org.springframework.http.MediaType.APPLICATION_JSON);
             var response = body == null ? spec.retrieve() : spec.body(body).retrieve();
             // A terminal call is required even for a bodiless response: without one, retrieve()'s
             // default error handling never runs and a 4xx/5xx from osTRIS would pass as "success".

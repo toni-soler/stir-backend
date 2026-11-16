@@ -48,7 +48,9 @@ public class DeviceCredentialService {
     public DeviceView addDevice(CurrentUser user, String label, String publicKeyBase64url) {
         UUID tenant = tenant(), actor = actor(user);
         var binding = myBinding(tenant, actor);
-        var added = ostris.addCredential(binding.communityId, binding.controllerId, publicKeyBase64url);
+        OstrisClient.CredentialAdded added;
+        try { added = ostris.addCredential(binding.communityId, binding.controllerId, publicKeyBase64url); }
+        catch (StirOstrisException ex) { throw approvalAware(ex); }
         var device = new ParticipantDeviceCredential();
         device.id = UUID.randomUUID(); device.tenantId = tenant; device.userId = actor;
         device.ostrisCredentialId = added.credentialId(); device.label = label.trim(); device.createdAt = Instant.now();
@@ -66,7 +68,8 @@ public class DeviceCredentialService {
         boolean ownedByCaller = ostris.credentialsForController(binding.communityId, binding.controllerId).stream()
             .anyMatch(c -> c.credentialId().equals(ostrisCredentialId));
         if (!ownedByCaller) throw new ResponseStatusException(NOT_FOUND, "Device not found");
-        ostris.revokeCredential(binding.communityId, ostrisCredentialId);
+        try { ostris.revokeCredential(binding.communityId, ostrisCredentialId); }
+        catch (StirOstrisException ex) { throw approvalAware(ex); }
         log.info("Device credential {} revoked, tenant={} actor={}", ostrisCredentialId, tenant, actor);
     }
 
@@ -85,5 +88,49 @@ public class DeviceCredentialService {
             }).toList();
     }
 
+    /**
+     * What the caller must get approved (IDAX Core per-operation approval) before osTRIS accepts a
+     * device change where the deployment requires it. STIR only describes the operation - action,
+     * resource and intent digest for the caller's OWN controller - so the client can ask the
+     * identity service for an approval and send it back in X-Operation-Approval. STIR cannot grant
+     * anything by describing it wrongly: osTRIS recomputes the digest from the change it is about
+     * to make and refuses any approval that does not match exactly.
+     */
+    public ApprovalIntent addDeviceIntent(CurrentUser user, String publicKeyBase64url) {
+        UUID tenant = tenant(), actor = actor(user);
+        var binding = myBinding(tenant, actor);
+        if (publicKeyBase64url == null || publicKeyBase64url.isBlank()) throw new ResponseStatusException(BAD_REQUEST, "Public key required");
+        return new ApprovalIntent(CREDENTIAL_ADD, binding.controllerId.toString(),
+            intentDigest(CREDENTIAL_ADD, tenant.toString(), binding.communityId.toString(), binding.controllerId.toString(), publicKeyBase64url));
+    }
+    public ApprovalIntent revokeDeviceIntent(CurrentUser user, UUID ostrisCredentialId) {
+        UUID tenant = tenant(), actor = actor(user);
+        var binding = myBinding(tenant, actor);
+        return new ApprovalIntent(CREDENTIAL_REVOKE, ostrisCredentialId.toString(),
+            intentDigest(CREDENTIAL_REVOKE, tenant.toString(), binding.communityId.toString(), ostrisCredentialId.toString()));
+    }
+
+    static final String CREDENTIAL_ADD = "OSTRIS_CREDENTIAL_ADD", CREDENTIAL_REVOKE = "OSTRIS_CREDENTIAL_REVOKE";
+    /** Same encoding as IDAX Core's OperationIntentDigest: sha256 over each part as <utf8-length>:<part>. */
+    static String intentDigest(String... parts) {
+        try {
+            var digest = java.security.MessageDigest.getInstance("SHA-256");
+            for (String part : parts) {
+                byte[] bytes = part.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                digest.update((bytes.length + ":").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                digest.update(bytes);
+            }
+            return java.util.HexFormat.of().formatHex(digest.digest());
+        } catch (java.security.NoSuchAlgorithmException e) { throw new IllegalStateException(e); }
+    }
+    /** osTRIS's approval and ownership refusals reach the client with their own status and code
+     * (428 = repeat with an approval); everything else keeps propagating unchanged. */
+    private static RuntimeException approvalAware(StirOstrisException ex) {
+        boolean relay = ex.code != null && (ex.code.startsWith("OPERATION_APPROVAL_") || ex.code.startsWith("CONTROLLER_"));
+        var status = relay ? org.springframework.http.HttpStatus.resolve(ex.status) : null;
+        return status == null ? ex : new ResponseStatusException(status, ex.code);
+    }
+
+    public record ApprovalIntent(String action, String resource, String intentDigest) {}
     public record DeviceView(UUID credentialId, String label, boolean revoked, Instant addedAt) {}
 }

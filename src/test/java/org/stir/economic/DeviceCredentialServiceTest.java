@@ -41,6 +41,25 @@ class DeviceCredentialServiceTest {
         verifyNoInteractions(ostris);
     }
 
+    @Test void approvalIntentDescribesTheCallersOwnControllerAndMatchesTheCoreDigestEncoding() {
+        // Fixed vector shared with IDAX Core's OperationIntentDigest test: sha256("1:a1:b").
+        assertEquals("facdde7abf1eac5b301273ab2e282f79bab0100f058833a7b8bdf9f80741e149", DeviceCredentialService.intentDigest("a", "b"));
+        var intent = service.addDeviceIntent(currentUser, "pk");
+        assertEquals("OSTRIS_CREDENTIAL_ADD", intent.action());
+        assertEquals(controller.toString(), intent.resource());
+        assertEquals(DeviceCredentialService.intentDigest("OSTRIS_CREDENTIAL_ADD", tenant.toString(), community.toString(), controller.toString(), "pk"), intent.intentDigest());
+        assertNotEquals(intent.intentDigest(), service.addDeviceIntent(currentUser, "another-pk").intentDigest());
+        assertThrows(ResponseStatusException.class, () -> service.addDeviceIntent(strangerUser, "pk"));
+    }
+
+    @Test void anApprovalRefusalFromOstrisReachesTheClientWithItsOwnStatusAndCode() {
+        when(ostris.addCredential(community, controller, "pk")).thenThrow(new StirOstrisException(428, "OPERATION_APPROVAL_REQUIRED", "needs approval"));
+        var refused = assertThrows(ResponseStatusException.class, () -> service.addDevice(currentUser, "Phone", "pk"));
+        assertEquals(428, refused.getStatusCode().value());
+        assertEquals("OPERATION_APPROVAL_REQUIRED", refused.getReason());
+        verify(devices, never()).saveAndFlush(any());
+    }
+
     @Test void addDeviceBindsToTheCallersOwnExistingControllerNeverANewOne() {
         var credentialId = UUID.randomUUID();
         when(ostris.addCredential(community, controller, "pk")).thenReturn(new OstrisClient.CredentialAdded(credentialId, controller, 3));

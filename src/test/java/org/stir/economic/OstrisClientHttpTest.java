@@ -48,6 +48,26 @@ class OstrisClientHttpTest {
         assertEquals("Bearer test-token", authHeader.get());
     }
 
+    @Test void relaysAPerOperationApprovalUntouchedAndOnlyWhenTheCallerSentOne() throws Exception {
+        AtomicReference<String> approval = new AtomicReference<>();
+        AtomicReference<Boolean> present = new AtomicReference<>();
+        OstrisClient client = client(exchange -> {
+            present.set(exchange.getRequestHeaders().containsKey("X-Operation-Approval"));
+            approval.set(exchange.getRequestHeaders().getFirst("X-Operation-Approval"));
+            respond(exchange, 201, "{\"credentialId\":\"" + UUID.randomUUID() + "\",\"controllerId\":\"" + UUID.randomUUID() + "\",\"activationSequence\":0}");
+        });
+        var request = new MockHttpServletRequest("POST", "/api/stir/economic/devices");
+        request.addHeader("Authorization", "Bearer test-token");
+        request.addHeader("X-Operation-Approval", "approval-token");
+        RequestContextHolder.setRequestAttributes(new ServletRequestAttributes(request));
+        client.addCredential(UUID.randomUUID(), UUID.randomUUID(), "pk");
+        assertEquals("approval-token", approval.get());
+
+        inboundRequestWithBearerToken("test-token");
+        client.addCredential(UUID.randomUUID(), UUID.randomUUID(), "pk");
+        assertFalse(Boolean.TRUE.equals(present.get()), "no approval header must be invented");
+    }
+
     @Test void omitsTheTenantHeaderWhenNoTenantIsResolved() throws Exception {
         AtomicReference<String> tenantHeader = new AtomicReference<>();
         AtomicReference<Boolean> tenantHeaderPresent = new AtomicReference<>();
