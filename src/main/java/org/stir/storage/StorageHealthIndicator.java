@@ -1,5 +1,6 @@
 package org.stir.storage;
 
+import org.springframework.context.annotation.Profile;
 import org.springframework.boot.actuate.health.Health;
 import org.springframework.boot.actuate.health.HealthIndicator;
 import org.springframework.stereotype.Component;
@@ -7,6 +8,7 @@ import org.springframework.stereotype.Component;
 /** Readiness must distinguish "app started" from "storage reachable" - a photo upload otherwise
  * fails mysteriously instead of the orchestrator ever noticing the dependency was down. */
 @Component
+@Profile("!governed-verifier")
 public class StorageHealthIndicator implements HealthIndicator {
     private final ObjectStorageService storage;
     public StorageHealthIndicator(ObjectStorageService storage) { this.storage = storage; }

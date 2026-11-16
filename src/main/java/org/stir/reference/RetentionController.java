@@ -11,8 +11,7 @@ import org.springframework.web.bind.annotation.*;
 
 /** Retention policy and the one real deletion-lifecycle action (anonymization), publisher/community-
  * authority gated exactly like ReferenceController's policy endpoints (CONSENT_RETENTION.md).
- * requireCommunityAuthority is checked again here as defense-in-depth, same shared method the
- * service itself calls - never a second implementation. */
+ * Community authority is enforced in RetentionService (ReferenceService.requireCommunityAuthority). */
 @RestController @RequestMapping("/api/stir/tenants/{tenantId}/references/retention")
 public class RetentionController {
     private final RetentionService service;
@@ -24,7 +23,7 @@ public class RetentionController {
     public Object currentPolicy(@PathVariable UUID communityId) { return service.currentPolicy(communityId); }
     @PostMapping("/policy/{communityId}") @PreAuthorize("@permissionService.hasPermission('stir.retention.manage')")
     public Object setPolicy(@PathVariable UUID communityId,@AuthenticationPrincipal CurrentUser user,@Valid @RequestBody PolicyRequest r) {
-        ReferenceService.requireCommunityAuthority(user);
+        
         return service.setPolicy(user,communityId,new RetentionService.PolicyRequest(r.retentionPeriodDays(),r.explanation()));
     }
     @GetMapping("/observation/{observationId}/status") @PreAuthorize("@permissionService.hasPermission('stir.references.publish')")
@@ -33,7 +32,7 @@ public class RetentionController {
     public Object due(@PathVariable UUID definitionId) { return service.dueForAnonymization(definitionId); }
     @PostMapping("/observation/{observationId}/anonymize") @PreAuthorize("@permissionService.hasPermission('stir.retention.manage')")
     public Object anonymize(@PathVariable UUID observationId,@AuthenticationPrincipal CurrentUser user,@Valid @RequestBody AnonymizeRequest r) {
-        ReferenceService.requireCommunityAuthority(user); return service.anonymize(user,observationId,r.reason());
+        return service.anonymize(user,observationId,r.reason());
     }
     public record PolicyRequest(@Min(90) int retentionPeriodDays,@NotBlank @Size(max=2000) String explanation) {}
     public record AnonymizeRequest(@NotBlank @Size(max=2000) String reason) {}

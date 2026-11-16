@@ -33,7 +33,7 @@ public class ParticipantIndependenceService {
     /** Triggered explicitly by a community-authorized publisher; the publisher decides WHEN to ask
      * osTRIS again, never WHAT the answer is. */
     public Map<String,Object> refresh(CurrentUser user, UUID targetUserId) {
-        ReferenceService.requireCommunityAuthority(user);
+        ReferenceService.requireCommunityAuthority(db,user,null);
         UUID actor=ReferenceService.actor(user), tenant=ReferenceService.tenant();
         var communityRows=db.queryForList("select community_id from stir.marketplace_economic_binding where tenant_id=?",tenant);
         if(communityRows.isEmpty()) throw new org.springframework.web.server.ResponseStatusException(

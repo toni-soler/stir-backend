@@ -1,5 +1,6 @@
 package org.stir.attachment;
 
+import org.springframework.context.annotation.Profile;
 import es.idynamicsax.idax.security.CurrentUser;
 import java.util.List;
 import java.util.UUID;
@@ -15,6 +16,7 @@ import org.stir.ratelimit.RateLimited;
 import static org.springframework.http.HttpStatus.CREATED;
 
 @RestController @RequestMapping("/api/stir/tenants/{tenantId}")
+@Profile("!governed-verifier")
 public class AttachmentController {
     private final AttachmentService service;
     public AttachmentController(AttachmentService service) { this.service = service; }

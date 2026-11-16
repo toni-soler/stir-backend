@@ -43,9 +43,36 @@ public class ReferenceService {
      * seat, no Guardian role and no community role of their own - being SuperAdmin never
      * substitutes for one. Ordinary public/community reads do not call this; only mutation
      * authority is gated here, not all of STIR. */
-    static void requireCommunityAuthority(CurrentUser user) {
-        actor(user);
-        if(user.isSuperuser()) throw new AccessDeniedException("Platform administration does not grant community governance authority");
+    /** Resolves community governance authority explicitly, never from a platform permission or
+     * superuser flag. Tenant owner/admin authority exists ONLY as BOOTSTRAP COMMUNITY AUTHORITY
+     * while Ordinary Governance is disabled for the community; once enabled, only an active
+     * stir.community_governance_member counts, with no fallback to tenant role. The community is
+     * the tenant's bound community (marketplace_economic_binding is one row per tenant); a
+     * requested community that differs from it is refused. */
+    static UUID requireBoundCommunity(JdbcTemplate db, UUID requestedCommunity) {
+        UUID tenant = tenant();
+        var bound = db.queryForList("select community_id from stir.marketplace_economic_binding where tenant_id=?", tenant);
+        if(bound.isEmpty()) throw new AccessDeniedException("Tenant has no bound community");
+        UUID community = (UUID)bound.getFirst().get("community_id");
+        if(requestedCommunity != null && !requestedCommunity.equals(community))
+            throw new AccessDeniedException("Community is not bound to this tenant");
+        return community;
+    }
+    static void requireCommunityAuthority(JdbcTemplate db, CurrentUser user, UUID requestedCommunity) {
+        UUID actor = actor(user);
+        UUID tenant = tenant();
+        UUID community = requireBoundCommunity(db, requestedCommunity);
+        var settings = db.queryForList("select ordinary_governance_enabled from stir.community_governance_settings where tenant_id=? and community_id=?", tenant, community);
+        boolean governanceEnabled = !settings.isEmpty() && Boolean.TRUE.equals(settings.getFirst().get("ordinary_governance_enabled"));
+        if(governanceEnabled) {
+            var member = db.queryForList("select 1 from stir.community_governance_member where tenant_id=? and community_id=? and user_id=? and removed_at is null", tenant, community, actor);
+            if(member.isEmpty()) throw new AccessDeniedException("Not an active community governance member");
+            return;
+        }
+        var role = db.queryForList("select tu.role from idax_core.tenant_user tu join idax_core.app_user au on au.user_id=tu.user_id "+
+            "where tu.tenant_id=? and tu.user_id=? and au.is_active", tenant, actor);
+        if(role.isEmpty() || !Set.of("owner","admin").contains(role.getFirst().get("role")))
+            throw new AccessDeniedException("Bootstrap community authority requires tenant owner or admin");
     }
     static Map<String,Object> parse(String json) {
         try { return JSON.readValue(json,new TypeReference<Map<String,Object>>(){}); }
@@ -77,7 +104,7 @@ public class ReferenceService {
         return rows.getFirst();
     }
     public Map<String,Object> create(CurrentUser user, ReferenceController.DefinitionRequest r) {
-        requireCommunityAuthority(user);
+        requireCommunityAuthority(db,user,null);
         var binding=one("select community_id,unit_id from stir.marketplace_economic_binding where tenant_id=?",tenant());
         UUID id=UUID.randomUUID();
         // Explicit existing community/unit binding, never tenant identity or a fiat conversion.
@@ -105,7 +132,7 @@ public class ReferenceService {
             throw new ResponseStatusException(CONFLICT,"Ordinary governance is active for this community; act through an approved proposal instead");
     }
     public Map<String,Object> policy(CurrentUser user,UUID id,ReferenceController.PolicyRequest r) {
-        requireCommunityAuthority(user);
+        requireCommunityAuthority(db,user,null);
         requireDirectMutationAllowed((UUID)definition(id).get("community_id"));
         return policyDirect(user,id,r);
     }
@@ -268,7 +295,7 @@ public class ReferenceService {
         return manifest;
     }
     public Map<String,Object> propose(CurrentUser user, UUID id, ReferenceController.ProposalRequest r) {
-        requireCommunityAuthority(user);
+        requireCommunityAuthority(db,user,null);
         definition(id);
         boolean qualitative="QUALITATIVE".equals(r.kind());
         if(qualitative ? r.lowerValue()!=null || r.upperValue()!=null : r.lowerValue()==null || r.upperValue()==null || r.lowerValue().compareTo(r.upperValue())>0)
@@ -282,7 +309,7 @@ public class ReferenceService {
         return one("select * from stir.reference_proposal where tenant_id=? and id=?",tenant(),proposal);
     }
     public Map<String,Object> publish(CurrentUser user,UUID proposal,String decision) {
-        requireCommunityAuthority(user);
+        requireCommunityAuthority(db,user,null);
         UUID definitionId=(UUID)one("select definition_id from stir.reference_proposal where tenant_id=? and id=?",tenant(),proposal).get("definition_id");
         requireDirectMutationAllowed((UUID)definition(definitionId).get("community_id"));
         return publishDirect(user,proposal,decision);

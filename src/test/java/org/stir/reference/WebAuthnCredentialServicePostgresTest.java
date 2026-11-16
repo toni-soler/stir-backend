@@ -42,7 +42,7 @@ class WebAuthnCredentialServicePostgresTest {
         connection=uncheckedConnect();
         try { connection.setAutoCommit(false); } catch (SQLException e) { throw new RuntimeException(e); }
         jdbc=new JdbcTemplate(new SingleConnectionDataSource(connection,true));
-        jdbc.execute("set local role idax_app");
+        jdbc.execute("set local role idax_governed_verifier");
         jdbc.queryForObject("select set_config('app.tenant_id',?,true)",String.class,tenant.toString());
         TenantContext.set(new TenantContext(tenant,null,UUID.randomUUID(),"test",TenantContext.DbRole.IDAX_APP));
         user=mock(CurrentUser.class); when(user.getUserId()).thenReturn(UUID.randomUUID());

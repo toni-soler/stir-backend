@@ -33,10 +33,12 @@ class MultiSourceValueEvidencePostgresTest {
     CurrentUser publisher, superadmin;
     @BeforeAll static void migrate() throws Exception {
         try(var c=DriverManager.getConnection(db.getJdbcUrl(),db.getUsername(),db.getPassword());var s=c.createStatement()) { s.execute("create role idax_app; create role idax_admin"); }
+        IdaxCoreMembershipFixture.install(db);
         Flyway.configure().dataSource(db.getJdbcUrl(),db.getUsername(),db.getPassword()).schemas("stir").locations("classpath:db/migration-stir").load().migrate();
     }
     @BeforeEach void setup() throws Exception {
         connection=DriverManager.getConnection(db.getJdbcUrl(),db.getUsername(),db.getPassword());connection.setAutoCommit(false);
+        IdaxCoreMembershipFixture.member(connection,tenant,userId,"owner");
         jdbc=new JdbcTemplate(new SingleConnectionDataSource(connection,true));
         jdbc.execute("set local role idax_app"); jdbc.queryForObject("select set_config('app.tenant_id',?,true)",String.class,tenant.toString());
         TenantContext.set(new TenantContext(tenant,null,userId,"test",TenantContext.DbRole.IDAX_APP));
@@ -202,7 +204,7 @@ class MultiSourceValueEvidencePostgresTest {
         assertThrows(AccessDeniedException.class,()->governance.proposeCommunitySeed(superadmin,id,new OrdinaryGovernanceService.SeedRequest("VALUE",new BigDecimal("30"),new BigDecimal("30"),"x","x",90)));
         var proposal=governance.proposeCommunitySeed(publisher,id,new OrdinaryGovernanceService.SeedRequest("VALUE",new BigDecimal("30"),new BigDecimal("30"),"x","x",90));
         UUID proposalId=UUID.fromString(proposal.get("id").toString());
-        assertThrows(AccessDeniedException.class,()->governance.vote(superadmin,proposalId,"APPROVE"));
+        assertThrows(org.springframework.web.server.ResponseStatusException.class,()->governance.vote(superadmin,proposalId,"APPROVE"));
         assertThrows(AccessDeniedException.class,()->governance.execute(superadmin,proposalId));
     }
     @Test void aNewSeedIsANewVersionNeverARewriteOfTheOlderOne() throws Exception {

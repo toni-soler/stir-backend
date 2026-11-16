@@ -1,5 +1,6 @@
 package org.stir.storage;
 
+import org.springframework.context.annotation.Profile;
 import io.minio.*;
 import java.io.InputStream;
 import org.springframework.core.env.Environment;
@@ -12,6 +13,7 @@ import org.springframework.stereotype.Component;
  * AttachmentController) - the bucket itself is never exposed to a browser.
  */
 @Component
+@Profile("!governed-verifier")
 public class ObjectStorageService {
     private final MinioClient client;
     private final String bucket;

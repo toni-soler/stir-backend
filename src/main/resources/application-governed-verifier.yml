@@ -1,0 +1,7 @@
+# Governed-state verifier process: the only STIR process that holds the credential able to write
+# effective constitutional state (see V20). Same binary as the ordinary runtime; the profile swaps
+# the database identity and enables the constitutional write controller.
+spring:
+  datasource:
+    username: idax_governed_verifier
+    password: ${governed_verifier_password:}
