@@ -47,9 +47,20 @@ public class ListingService {
     private Listing entity(UUID id) {
         return listings.findByIdAndTenantId(id,tenant()).orElseThrow(()->new ResponseStatusException(NOT_FOUND,"Listing not found"));
     }
-    public ListingView read(UUID id) {
+    public ListingView read(UUID id) { return read(id,null); }
+    /** The counterpart note is returned only to the owner and to someone who has a negotiation on this
+     * listing - the people the owner chose to share it with (STRUCTURED_TERMS_AND_NEEDS.md). */
+    public ListingView read(UUID id, CurrentUser user) {
         var listing=entity(id);
-        return ListingView.of(listing,displayNames(List.of(listing.ownerId)).get(listing.ownerId),mainPhotoIds(List.of(listing.id)).get(listing.id));
+        return ListingView.of(listing,displayNames(List.of(listing.ownerId)).get(listing.ownerId),mainPhotoIds(List.of(listing.id)).get(listing.id),
+            mayReadCounterpartNote(listing,user));
+    }
+    private boolean mayReadCounterpartNote(Listing listing, CurrentUser user) {
+        if(listing.counterpartNote==null || user==null || user.isService() || user.getUserId()==null) return false;
+        if(listing.ownerId.equals(user.getUserId())) return true;
+        return Boolean.TRUE.equals(jdbc.queryForObject(
+            "select exists(select 1 from stir.negotiation where tenant_id=? and listing_id=? and initiator_id=?)",Boolean.class,
+            listing.tenantId,listing.id,user.getUserId()));
     }
     public Page<ListingView> search(CurrentUser user, String q, String direction, String category, String resourceKind, String status, boolean mine, int page, int size) {
         UUID tenant=tenant();
@@ -66,7 +77,7 @@ public class ListingService {
         var result=listings.findAll(spec,PageRequest.of(page,size,Sort.by(Sort.Order.desc("createdAt"),Sort.Order.asc("id"))));
         var names=displayNames(result.getContent().stream().map(row->row.ownerId).toList());
         var mainPhotos=mainPhotoIds(result.getContent().stream().map(row->row.id).toList());
-        return result.map(row->ListingView.of(row,names.get(row.ownerId),mainPhotos.get(row.id)));
+        return result.map(row->ListingView.of(row,names.get(row.ownerId),mainPhotos.get(row.id),false));
     }
     private Map<UUID,UUID> mainPhotoIds(Collection<UUID> listingIds) {
         if(listingIds.isEmpty()) return Map.of();
@@ -80,7 +91,7 @@ public class ListingService {
     public Listing create(CurrentUser user, ListingRequest request) {
         if(request.version()!=null) throw new ResponseStatusException(BAD_REQUEST,"Version is assigned by server");
         var listing=new Listing(); listing.id=UUID.randomUUID(); listing.tenantId=tenant(); listing.ownerId=owner(user);
-        listing.status="ACTIVE"; listing.createdAt=Instant.now(); apply(listing,request);
+        listing.status="ACTIVE"; listing.createdAt=Instant.now(); apply(listing,request,true);
         listing=listings.saveAndFlush(listing);
         evidence.recorded(revisions.freeze(listing));
         return listing;
@@ -95,7 +106,7 @@ public class ListingService {
         // right now saw it; it cannot be reversed under them (NEGOTIATION_EXECUTION_INTEGRITY.md).
         if(!Objects.equals(listing.direction,request.direction()) && hasOpenNegotiations(listing))
             throw new ResponseStatusException(CONFLICT,"This listing has open negotiations; whether it offers or requests something cannot change until they are accepted or declined");
-        apply(listing,request);
+        apply(listing,request,false);
         listing=listings.saveAndFlush(listing);
         // Every edit is a new immutable revision - an earlier LISTING/WANTED observation still
         // points at its own revision, never at the mutable listing row, so editing never rewrites
@@ -108,6 +119,26 @@ public class ListingService {
         if("CLOSED".equals(listing.status)) return listing;
         checkVersion(listing,version); listing.status="CLOSED"; listing.updatedAt=Instant.now(); return listings.saveAndFlush(listing);
     }
+    private void applyDetails(Listing listing, ListingDetails details) {
+        if(details.neededBy()!=null && !"WANTED".equals(listing.direction))
+            throw new ResponseStatusException(BAD_REQUEST,"Only a need has a date by which it is needed");
+        var flexible=dimensions(details.flexibleOn()); var firm=dimensions(details.firmOn());
+        if(flexible!=null && firm!=null && !Collections.disjoint(Arrays.asList(flexible.split(",")),Arrays.asList(firm.split(","))))
+            throw new ResponseStatusException(BAD_REQUEST,"A dimension cannot be both flexible and firm");
+        listing.itemCondition=details.itemCondition(); listing.fulfilmentMode=details.fulfilmentMode();
+        listing.includedItems=trimmed(details.includedItems()); listing.availableUntil=details.availableUntil();
+        listing.availability=details.availability()==null?"AVAILABLE":details.availability();
+        listing.neededBy=details.neededBy(); listing.flexibleOn=flexible; listing.firmOn=firm;
+        listing.counterpartNote=trimmed(details.counterpartNote());
+    }
+    /** Canonical form: distinct, in the fixed order of ListingDetails.DIMENSIONS, comma-separated. */
+    static String dimensions(List<String> values) {
+        if(values==null || values.isEmpty()) return null;
+        var present=new HashSet<>(values);
+        var ordered=Arrays.stream(ListingDetails.DIMENSIONS.split("[|]")).filter(present::contains).toList();
+        return ordered.isEmpty()?null:String.join(",",ordered);
+    }
+    private static String trimmed(String value) { return value==null || value.isBlank() ? null : value.trim(); }
     private boolean hasOpenNegotiations(Listing listing) {
         return Boolean.TRUE.equals(jdbc.queryForObject(
             "select exists(select 1 from stir.negotiation where tenant_id=? and listing_id=? and status='OPEN')",Boolean.class,listing.tenantId,listing.id));
@@ -120,7 +151,7 @@ public class ListingService {
     private void checkVersion(Listing listing, Long version) {
         if(version==null || listing.version!=version) throw new ResponseStatusException(CONFLICT,"Listing changed; reload before editing");
     }
-    private void apply(Listing listing, ListingRequest request) {
+    private void apply(Listing listing, ListingRequest request, boolean creating) {
         var catalogs=catalogs();
         if(!catalogs.get("categories").contains(request.category()) || !catalogs.get("resourceKinds").contains(request.resourceKind()))
             throw new ResponseStatusException(BAD_REQUEST,"Unknown category or resource kind");
@@ -136,6 +167,10 @@ public class ListingService {
         listing.indicativeUnitLabel=request.indicativeUnitLabel()==null?null:request.indicativeUnitLabel().trim();
         listing.indicativeUnitRef=request.indicativeUnitRef();
         listing.shareReferenceObservation=request.shareReferenceObservation();
+        // An update without details keeps the current ones: a catalog contract v1 client does not know
+        // them and must not erase, say, the counterpart note by editing a title.
+        if(creating || request.details()!=null) applyDetails(listing,request.detailsOrNone());
+        if(!"WANTED".equals(listing.direction)) listing.neededBy=null;
         listing.updatedAt=Instant.now();
     }
 }

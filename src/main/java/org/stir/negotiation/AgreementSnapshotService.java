@@ -18,15 +18,20 @@ import org.springframework.stereotype.Service;
  */
 @Service
 public class AgreementSnapshotService {
-    public static final int SCHEMA_VERSION = 3;
+    /** 4 adds the structured terms and openQuestionsAcknowledged (STRUCTURED_TERMS_AND_NEEDS.md);
+     * snapshots frozen under 3 keep their bytes and digest. */
+    public static final int SCHEMA_VERSION = 4;
     private final AgreementSnapshotRepository snapshots;
     private final SecureRandom random = new SecureRandom();
 
     public AgreementSnapshotService(AgreementSnapshotRepository snapshots) { this.snapshots=snapshots; }
 
     public AgreementSnapshot freeze(Agreement agreement, Negotiation negotiation, Offer acceptedOffer, String listingDirection) {
+        return freeze(agreement, negotiation, acceptedOffer, listingDirection, false);
+    }
+    public AgreementSnapshot freeze(Agreement agreement, Negotiation negotiation, Offer acceptedOffer, String listingDirection, boolean openQuestionsAcknowledged) {
         String nonce = Base64.getUrlEncoder().withoutPadding().encodeToString(randomBytes(32));
-        var fields = fields(agreement, negotiation, acceptedOffer, listingDirection, nonce);
+        var fields = fields(agreement, negotiation, acceptedOffer, listingDirection, nonce, openQuestionsAcknowledged);
         byte[] bytes = CanonicalJson.canonicalBytes(fields);
         var snapshot = new AgreementSnapshot();
         snapshot.id = UUID.randomUUID();
@@ -42,6 +47,10 @@ public class AgreementSnapshotService {
 
     /** Package-visible so CanonicalJsonTest can build identical field maps without persistence. */
     static Map<String, Object> fields(Agreement agreement, Negotiation negotiation, Offer offer, String listingDirection, String nonce) {
+        return fields(agreement, negotiation, offer, listingDirection, nonce, false);
+    }
+    static Map<String, Object> fields(Agreement agreement, Negotiation negotiation, Offer offer, String listingDirection, String nonce,
+                                     boolean openQuestionsAcknowledged) {
         Map<String, Object> fields = new LinkedHashMap<>();
         fields.put("format", CanonicalJson.FORMAT);
         fields.put("schemaVersion", SCHEMA_VERSION);
@@ -60,6 +69,15 @@ public class AgreementSnapshotService {
         fields.put("terms", offer.terms);
         fields.put("externalContractNamespace", offer.externalContractNamespace);
         fields.put("externalContractDigest", offer.externalContractDigest);
+        // Structured terms (schemaVersion 4): what each side agreed to do, and what was knowingly left open.
+        fields.put("scope", offer.scope);
+        fields.put("ownerTasks", offer.ownerTasks);
+        fields.put("initiatorTasks", offer.initiatorTasks);
+        fields.put("fulfilmentMode", offer.fulfilmentMode);
+        fields.put("fulfilBy", Objects.toString(offer.fulfilBy, null));
+        fields.put("openQuestions", offer.openQuestions);
+        fields.put("openQuestionsAcknowledged", openQuestionsAcknowledged);
+        fields.put("offerValidUntil", Objects.toString(offer.validUntil, null));
         // Explicit, unambiguous economic direction frozen at accept time (never re-derived at
         // commit time - see NegotiationService.accept()); null on both means no economic execution.
         fields.put("payerUserId", agreement.payerUserId == null ? null : agreement.payerUserId.toString());

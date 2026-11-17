@@ -223,4 +223,61 @@ class NegotiationServiceTest {
         TenantContext.clear();
         assertThrows(AccessDeniedException.class,()->service.open(initiatorUser,listing.id,offer("x")));
     }
+
+    // STRUCTURED_TERMS_AND_NEEDS.md
+    OfferRequest structured(String openQuestions, java.time.Instant validUntil) {
+        return new OfferRequest("Visit and adjust the blind",null,null,new BigDecimal("8"),null,null,false,null,null,
+            new OfferTerms("Diagnosis and adjustment only; a new part is not included","Bring tools; explain what the part costs",
+                "Clear access to the window","ON_SITE",java.time.LocalDate.of(2026,12,1),openQuestions,validUntil));
+    }
+    @Test void structuredTermsAreKeptOnTheOfferAndFrozenIntoTheVersion4Snapshot() throws Exception {
+        var detail=service.open(initiatorUser,listing.id,structured(null,null));
+        var negotiation=negotiationStore.get(detail.id());
+        var offer=detail.offers().get(0);
+        assertEquals("Clear access to the window",offer.initiatorTasks);
+        assertEquals("ON_SITE",offer.fulfilmentMode);
+        var agreement=service.accept(ownerUser,negotiation.id,offer.id,negotiation.version);
+        var snapshot=new com.fasterxml.jackson.databind.ObjectMapper().readTree(agreement.snapshot().canonicalJson());
+        assertEquals(4,snapshot.get("schemaVersion").asInt());
+        assertEquals("Diagnosis and adjustment only; a new part is not included",snapshot.get("scope").asText());
+        assertEquals("Bring tools; explain what the part costs",snapshot.get("ownerTasks").asText());
+        assertEquals("Clear access to the window",snapshot.get("initiatorTasks").asText());
+        assertEquals("2026-12-01",snapshot.get("fulfilBy").asText());
+        assertTrue(snapshot.get("openQuestions").isNull());
+        assertFalse(snapshot.get("openQuestionsAcknowledged").asBoolean());
+    }
+    @Test void anOfferWithOpenQuestionsIsOnlyAcceptedWhenTheyAreAcknowledged() throws Exception {
+        var detail=service.open(initiatorUser,listing.id,structured("Which part is needed is decided at the visit",null));
+        var negotiation=negotiationStore.get(detail.id());
+        var offerId=detail.offers().get(0).id;
+        var refused=assertThrows(ResponseStatusException.class,()->service.accept(ownerUser,negotiation.id,offerId,negotiation.version));
+        assertEquals(409,refused.getStatusCode().value());
+        assertEquals("OPEN",negotiation.status);
+        var agreement=service.accept(ownerUser,negotiation.id,offerId,negotiation.version,false,null,null,true);
+        var snapshot=new com.fasterxml.jackson.databind.ObjectMapper().readTree(agreement.snapshot().canonicalJson());
+        assertEquals("Which part is needed is decided at the visit",snapshot.get("openQuestions").asText());
+        assertTrue(snapshot.get("openQuestionsAcknowledged").asBoolean());
+    }
+    @Test void anExpiredOfferCannotBeAcceptedButStaysInTheHistory() {
+        var detail=service.open(initiatorUser,listing.id,structured(null,java.time.Instant.now().plusSeconds(3600)));
+        var negotiation=negotiationStore.get(detail.id());
+        var offer=offersByNegotiation.get(negotiation.id).get(0);
+        offer.validUntil=java.time.Instant.now().minusSeconds(1);
+        var refused=assertThrows(ResponseStatusException.class,()->service.accept(ownerUser,negotiation.id,offer.id,negotiation.version));
+        assertEquals(409,refused.getStatusCode().value());
+        assertEquals("PROPOSED",offer.status);
+        // The other party can still answer with a new proposal.
+        assertEquals(2,service.counter(ownerUser,negotiation.id,offer("Same, valid again"),negotiation.version).offers().size());
+    }
+    @Test void anOfferCannotBeMadeAlreadyExpired() {
+        var refused=assertThrows(ResponseStatusException.class,()->service.open(initiatorUser,listing.id,structured(null,java.time.Instant.now().minusSeconds(60))));
+        assertEquals(400,refused.getStatusCode().value());
+    }
+    @Test void plainOffersKeepWorkingWithoutStructuredTerms() throws Exception {
+        var negotiation=openNegotiation();
+        var agreement=service.accept(ownerUser,negotiation.id,negotiation.lastOfferId,negotiation.version);
+        var snapshot=new com.fasterxml.jackson.databind.ObjectMapper().readTree(agreement.snapshot().canonicalJson());
+        assertTrue(snapshot.get("scope").isNull());
+        assertFalse(snapshot.get("openQuestionsAcknowledged").asBoolean());
+    }
 }

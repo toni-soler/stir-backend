@@ -147,6 +147,12 @@ public class NegotiationService {
      * an offer AND to who pays whom; an unchanged offerId/version alone does not pin the latter. */
     public AgreementDetail accept(CurrentUser user, UUID negotiationId, UUID offerId, long expectedVersion, boolean shareReferenceObservation,
             UUID expectedPayer, UUID expectedPayee) {
+        return accept(user,negotiationId,offerId,expectedVersion,shareReferenceObservation,expectedPayer,expectedPayee,false);
+    }
+    /** acknowledgeOpenQuestions: an offer that leaves questions open can only be accepted by saying so;
+     * the snapshot then records that these terms were accepted with those questions still open. */
+    public AgreementDetail accept(CurrentUser user, UUID negotiationId, UUID offerId, long expectedVersion, boolean shareReferenceObservation,
+            UUID expectedPayer, UUID expectedPayee, boolean acknowledgeOpenQuestions) {
         UUID tenant=tenant(), actor=actor(user);
         var negotiation=partyNegotiation(tenant,negotiationId,actor);
         if(!"OPEN".equals(negotiation.status)) throw new ResponseStatusException(CONFLICT,"Negotiation is closed");
@@ -154,6 +160,10 @@ public class NegotiationService {
         var head=head(negotiation);
         if(offerId==null || !head.id.equals(offerId)) throw new ResponseStatusException(CONFLICT,"Offer is no longer current; reload before accepting");
         if(head.authorId.equals(actor)) throw new ResponseStatusException(CONFLICT,"Only the other party may accept this offer");
+        if(head.validUntil!=null && Instant.now().isAfter(head.validUntil))
+            throw new ResponseStatusException(CONFLICT,"This offer could only be accepted until "+head.validUntil+"; ask for a new one");
+        if(head.openQuestions!=null && !acknowledgeOpenQuestions)
+            throw new ResponseStatusException(CONFLICT,"This offer leaves questions open; accept it only if you agree to these terms with those questions still open");
         var listing=lockedActiveListing(tenant,negotiation.listingId);
         var parties=parties(negotiation,listing);
         boolean economic=head.proposedAmount!=null;
@@ -178,7 +188,7 @@ public class NegotiationService {
         agreement.createdAt=Instant.now();
         var accepted=agreement;
         agreement=Conflicts.onLostRace(()->agreements.saveAndFlush(accepted));
-        var snapshot=snapshotService.freeze(agreement,negotiation,head,listing.direction);
+        var snapshot=snapshotService.freeze(agreement,negotiation,head,listing.direction,head.openQuestions!=null && acknowledgeOpenQuestions);
         references.accepted(negotiation,head,agreement,snapshot,shareReferenceObservation);
         notifications.create(tenant,head.authorId,"OFFER_ACCEPTED","AGREEMENT",agreement.id);
         return AgreementDetail.of(agreement,snapshot);
@@ -219,6 +229,12 @@ public class NegotiationService {
         offer.terms=blank(request.terms()); offer.status="PROPOSED"; offer.createdAt=Instant.now();
         offer.externalContractNamespace=request.externalContractNamespace();
         offer.externalContractDigest=request.externalContractDigest();
+        var terms=request.structuredTermsOrNone();
+        if(terms.validUntil()!=null && !terms.validUntil().isAfter(offer.createdAt))
+            throw new ResponseStatusException(BAD_REQUEST,"An offer cannot already have expired when it is made");
+        offer.scope=blank(terms.scope()); offer.ownerTasks=blank(terms.ownerTasks()); offer.initiatorTasks=blank(terms.initiatorTasks());
+        offer.fulfilmentMode=terms.fulfilmentMode(); offer.fulfilBy=terms.fulfilBy();
+        offer.openQuestions=blank(terms.openQuestions()); offer.validUntil=terms.validUntil();
         return offer;
     }
     private String blank(String value) { return (value==null || value.isBlank()) ? null : value.trim(); }

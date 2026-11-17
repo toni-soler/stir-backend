@@ -10,7 +10,7 @@ import org.stir.negotiation.CanonicalJson;
  * time (MULTI_SOURCE_VALUE_EVIDENCE.md). */
 @Service
 public class ListingRevisionService {
-    public static final String FORMAT = "STIR-LISTING-REVISION-JCS-1";
+    public static final String FORMAT = "STIR-LISTING-REVISION-JCS-2";
     private final ListingRevisionRepository revisions;
     public ListingRevisionService(ListingRevisionRepository revisions) { this.revisions=revisions; }
 
@@ -27,6 +27,16 @@ public class ListingRevisionService {
         fields.put("indicativeUnitRef", listing.indicativeUnitRef);
         fields.put("referenceDefinitionId", listing.referenceDefinitionId==null?null:listing.referenceDefinitionId.toString());
         fields.put("shareReferenceObservation", listing.shareReferenceObservation);
+        // JCS-2: the comparable properties of what was published. The counterpart note is private and
+        // is deliberately not frozen here - revisions feed reference evidence.
+        fields.put("itemCondition", listing.itemCondition);
+        fields.put("fulfilmentMode", listing.fulfilmentMode);
+        fields.put("includedItems", listing.includedItems);
+        fields.put("availableUntil", listing.availableUntil==null?null:listing.availableUntil.toString());
+        fields.put("availability", listing.availability);
+        fields.put("neededBy", listing.neededBy==null?null:listing.neededBy.toString());
+        fields.put("flexibleOn", listing.flexibleOn);
+        fields.put("firmOn", listing.firmOn);
         byte[] bytes = CanonicalJson.canonicalBytes(fields);
         var revision = new ListingRevision();
         revision.id = java.util.UUID.randomUUID();

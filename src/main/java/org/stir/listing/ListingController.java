@@ -37,7 +37,7 @@ public class ListingController {
     @GetMapping("/catalogs") @PreAuthorize("@permissionService.hasPermission('stir.listings.read')")
     public Map<String,List<String>> catalogs() { return service.catalogs(); }
     @GetMapping("/{id}") @PreAuthorize("@permissionService.hasPermission('stir.listings.read')")
-    public ListingView read(@PathVariable UUID id) { return service.read(id); }
+    public ListingView read(@PathVariable UUID id,@AuthenticationPrincipal CurrentUser user) { return service.read(id,user); }
     @PostMapping @ResponseStatus(CREATED) @PreAuthorize("@permissionService.hasPermission('stir.listings.create')")
     @RateLimited(key = "createListing", limit = 20, windowSeconds = 300)
     public Listing create(@AuthenticationPrincipal CurrentUser user,@Valid @RequestBody ListingRequest request) { return service.create(user,request); }

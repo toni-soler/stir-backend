@@ -60,4 +60,62 @@ class ListingServiceTest {
     }
     @Test void editsTakeTheRowLock(){openNegotiations(false);service.update(listing.id,user,request(2L));verify(repository).lockForUpdate(listing.id,tenant);}
     @Test void missingTenantFailsClosed(){TenantContext.clear();assertThrows(AccessDeniedException.class,()->service.read(listing.id));}
+
+    // STRUCTURED_TERMS_AND_NEEDS.md
+    ListingRequest detailed(String direction, ListingDetails details, Long version) {
+        return new ListingRequest(direction,"Blind repair","Stuck blind","general","physical",null,version,null,null,null,null,null,false,details);
+    }
+    @Test void detailsAreStoredWithDimensionsInCanonicalOrder() {
+        var details=new ListingDetails("GOOD","PICKUP","Charger and case",java.time.LocalDate.of(2026,12,31),"IN_CONVERSATION",
+            java.time.LocalDate.of(2026,12,1),List.of("AMOUNT","TIMING","TIMING"),List.of("PLACE"),"  Third floor, no lift  ");
+        var result=service.create(user,detailed("WANTED",details,null));
+        assertEquals("GOOD",result.itemCondition); assertEquals("PICKUP",result.fulfilmentMode);
+        assertEquals("IN_CONVERSATION",result.availability);
+        assertEquals("TIMING,AMOUNT",result.flexibleOn); assertEquals("PLACE",result.firmOn);
+        assertEquals("Third floor, no lift",result.counterpartNote);
+    }
+    @Test void withoutDetailsAListingIsAvailableAndHasNoneOfThem() {
+        var result=service.create(user,request(null));
+        assertEquals("AVAILABLE",result.availability); assertNull(result.itemCondition); assertNull(result.counterpartNote);
+    }
+    @Test void anUpdateWithoutDetailsKeepsThemAndOneWithDetailsReplacesThem() {
+        openNegotiations(false);
+        listing.counterpartNote="Third floor"; listing.itemCondition="FAIR";
+        service.update(listing.id,user,request(2L));
+        assertEquals("Third floor",listing.counterpartNote); assertEquals("FAIR",listing.itemCondition);
+        listing.version=2;
+        service.update(listing.id,user,detailed("OFFER",ListingDetails.NONE,2L));
+        assertNull(listing.counterpartNote); assertNull(listing.itemCondition); assertEquals("AVAILABLE",listing.availability);
+    }
+    @Test void onlyANeedHasANeededByDate() {
+        var details=new ListingDetails(null,null,null,null,null,java.time.LocalDate.of(2026,12,1),null,null,null);
+        assertEquals(400,assertThrows(ResponseStatusException.class,()->service.create(user,detailed("OFFER",details,null))).getStatusCode().value());
+    }
+    @Test void aDimensionCannotBeBothFlexibleAndFirm() {
+        var details=new ListingDetails(null,null,null,null,null,null,List.of("PLACE"),List.of("PLACE"),null);
+        assertEquals(400,assertThrows(ResponseStatusException.class,()->service.create(user,detailed("WANTED",details,null))).getStatusCode().value());
+    }
+    @Test void theCounterpartNoteIsOnlyReadByTheOwnerAndThePeopleNegotiating() {
+        listing.counterpartNote="Third floor, no lift";
+        var negotiator=UUID.randomUUID(); var stranger=UUID.randomUUID();
+        when(jdbc.queryForObject(contains("initiator_id"),eq(Boolean.class),eq(tenant),eq(listing.id),eq(negotiator))).thenReturn(true);
+        when(jdbc.queryForObject(contains("initiator_id"),eq(Boolean.class),eq(tenant),eq(listing.id),eq(stranger))).thenReturn(false);
+        assertEquals("Third floor, no lift",service.read(listing.id,user).counterpartNote());
+        var asNegotiator=mock(CurrentUser.class); when(asNegotiator.getUserId()).thenReturn(negotiator);
+        assertEquals("Third floor, no lift",service.read(listing.id,asNegotiator).counterpartNote());
+        var asStranger=mock(CurrentUser.class); when(asStranger.getUserId()).thenReturn(stranger);
+        var view=service.read(listing.id,asStranger);
+        assertNull(view.counterpartNote()); assertTrue(view.hasCounterpartNote());
+        assertNull(service.read(listing.id).counterpartNote());
+    }
+    @Test void aRevisionFreezesComparablePropertiesButNeverTheCounterpartNote() {
+        var revisions=mock(ListingRevisionRepository.class);
+        when(revisions.saveAndFlush(any())).thenAnswer(i->i.getArgument(0));
+        listing.title="Blind"; listing.itemCondition="FAIR"; listing.fulfilmentMode="ON_SITE"; listing.availability="AVAILABLE";
+        listing.counterpartNote="Third floor, no lift";
+        var revision=new ListingRevisionService(revisions).freeze(listing);
+        assertTrue(revision.canonicalJson.contains("\"itemCondition\":\"FAIR\""));
+        assertTrue(revision.canonicalJson.contains("STIR-LISTING-REVISION-JCS-2"));
+        assertFalse(revision.canonicalJson.contains("Third floor"));
+    }
 }
