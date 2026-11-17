@@ -42,8 +42,11 @@ public class OrdinaryGovernanceService {
         return rows.isEmpty()?Map.of("communityId",community,"ordinaryGovernanceEnabled",false):Map.of("communityId",community,"ordinaryGovernanceEnabled",rows.getFirst().get("ordinary_governance_enabled"));
     }
     public Map<String,Object> setEnabled(CurrentUser user,UUID community,boolean enabled) {
-        ReferenceService.requireCommunityAuthority(user);
+        ReferenceService.requireCommunityAuthority(db,user,community);
         UUID actor=ReferenceService.actor(user);
+        if(enabled && db.queryForObject("select count(*) from stir.community_governance_member where tenant_id=? and community_id=? and removed_at is null",
+                Integer.class,ReferenceService.tenant(),community)==0)
+            throw new ResponseStatusException(BAD_REQUEST,"Enable Ordinary Governance only after at least one active member is on the roster");
         db.update("insert into stir.community_governance_settings values (?,?,?,?,?) on conflict (tenant_id,community_id) do update set "+
             "ordinary_governance_enabled=excluded.ordinary_governance_enabled,updated_at=excluded.updated_at,updated_by=excluded.updated_by",
             ReferenceService.tenant(),community,enabled,Timestamp.from(Instant.now()),actor);
@@ -56,7 +59,7 @@ public class OrdinaryGovernanceService {
             "where tenant_id=? and community_id=? and removed_at is null order by added_at",ReferenceService.tenant(),community);
     }
     public Map<String,Object> addMember(CurrentUser user,UUID community,UUID targetUser) {
-        ReferenceService.requireCommunityAuthority(user);
+        ReferenceService.requireCommunityAuthority(db,user,community);
         UUID actor=ReferenceService.actor(user);
         var existing=db.queryForList("select id from stir.community_governance_member where tenant_id=? and community_id=? and user_id=?",ReferenceService.tenant(),community,targetUser);
         if(!existing.isEmpty()) {
@@ -69,7 +72,7 @@ public class OrdinaryGovernanceService {
         return Map.of("communityId",community,"userId",targetUser,"member",true);
     }
     public Map<String,Object> removeMember(CurrentUser user,UUID community,UUID targetUser) {
-        ReferenceService.requireCommunityAuthority(user);
+        ReferenceService.requireCommunityAuthority(db,user,community);
         UUID actor=ReferenceService.actor(user);
         db.update("update stir.community_governance_member set removed_at=?,removed_by=? where tenant_id=? and community_id=? and user_id=? and removed_at is null",
             Timestamp.from(Instant.now()),actor,ReferenceService.tenant(),community,targetUser);
@@ -80,7 +83,7 @@ public class OrdinaryGovernanceService {
     public record PolicyRequest(int quorumNumerator,int quorumDenominator,int approvalNumerator,int approvalDenominator,
         int votingWindowHours,String abstentionRule,String explanation) {}
     public Map<String,Object> setPolicy(CurrentUser user,UUID community,PolicyRequest r) {
-        ReferenceService.requireCommunityAuthority(user);
+        ReferenceService.requireCommunityAuthority(db,user,community);
         UUID actor=ReferenceService.actor(user);
         if(r.approvalNumerator()*2<=r.approvalDenominator())
             throw new ResponseStatusException(BAD_REQUEST,"Approval threshold must mean a real majority (>50%)");
@@ -140,7 +143,7 @@ public class OrdinaryGovernanceService {
         return ReferenceService.digest(ReferenceService.canonical(Map.of("retentionPolicyVersion",policy.get("version"))));
     }
     public Map<String,Object> proposePublishReference(CurrentUser user,UUID definitionId,UUID referenceProposalId) {
-        ReferenceService.requireCommunityAuthority(user);
+        ReferenceService.requireCommunityAuthority(db,user,null);
         UUID actor=ReferenceService.actor(user);
         var definition=reference.definition(definitionId); UUID community=(UUID)definition.get("community_id");
         requireElector(community,actor);
@@ -155,7 +158,7 @@ public class OrdinaryGovernanceService {
         return proposal(proposal);
     }
     public Map<String,Object> proposePolicyChange(CurrentUser user,UUID definitionId,ReferenceController.PolicyRequest r) {
-        ReferenceService.requireCommunityAuthority(user);
+        ReferenceService.requireCommunityAuthority(db,user,null);
         UUID actor=ReferenceService.actor(user);
         var definition=reference.definition(definitionId); UUID community=(UUID)definition.get("community_id");
         requireElector(community,actor);
@@ -176,7 +179,7 @@ public class OrdinaryGovernanceService {
      * this any more than any other mutation here - requireCommunityAuthority above, same as always. */
     public record SeedRequest(String kind,BigDecimal lowerValue,BigDecimal upperValue,String rationale,String basis,int validDays) {}
     public Map<String,Object> proposeCommunitySeed(CurrentUser user,UUID definitionId,SeedRequest r) {
-        ReferenceService.requireCommunityAuthority(user);
+        ReferenceService.requireCommunityAuthority(db,user,null);
         UUID actor=ReferenceService.actor(user);
         var definition=reference.definition(definitionId); UUID community=(UUID)definition.get("community_id");
         requireElector(community,actor);
@@ -196,7 +199,7 @@ public class OrdinaryGovernanceService {
      * unlike PUBLISH_REFERENCE/REFERENCE_POLICY_CHANGE, community_id (already NOT NULL on every
      * ordinary_proposal row) is the only scoping this proposal needs. */
     public Map<String,Object> proposeRetentionPolicyChange(CurrentUser user,UUID community,RetentionService.PolicyRequest r) {
-        ReferenceService.requireCommunityAuthority(user);
+        ReferenceService.requireCommunityAuthority(db,user,community);
         UUID actor=ReferenceService.actor(user);
         requireElector(community,actor);
         String payload=ReferenceService.canonical(Map.of("retentionPeriodDays",r.retentionPeriodDays(),"explanation",r.explanation()));
@@ -206,7 +209,7 @@ public class OrdinaryGovernanceService {
 
     // --- Voting ---
     public Map<String,Object> vote(CurrentUser user,UUID proposalId,String choice) {
-        ReferenceService.requireCommunityAuthority(user);
+        ReferenceService.requireBoundCommunity(db,null);
         UUID actor=ReferenceService.actor(user);
         if(!Set.of("APPROVE","REJECT","ABSTAIN").contains(choice)) throw new ResponseStatusException(BAD_REQUEST,"Invalid vote choice");
         lock(ReferenceService.tenant()+":ordinary-vote:"+proposalId);
@@ -292,7 +295,7 @@ public class OrdinaryGovernanceService {
 
     // --- Execute: only the exact approved proposal, only once, never an administrative shortcut ---
     public Map<String,Object> execute(CurrentUser user,UUID proposalId) {
-        ReferenceService.requireCommunityAuthority(user);
+        ReferenceService.requireCommunityAuthority(db,user,null);
         lock(ReferenceService.tenant()+":ordinary-execute:"+proposalId);
         var proposal=lazyClose(proposalId);
         if(!"APPROVED".equals(proposal.get("status"))) throw new ResponseStatusException(CONFLICT,"Proposal is not approved");

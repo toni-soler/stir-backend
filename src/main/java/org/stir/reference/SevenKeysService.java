@@ -171,7 +171,7 @@ public class SevenKeysService {
             ReferenceService.tenant(),authority,sequence,type,json,previous,ReferenceService.digest(json),Timestamp.from(Instant.now()));
     }
     public Map<String,Object> bootstrap(CurrentUser user,Bootstrap input) {
-        ReferenceService.actor(user);
+        ReferenceService.requireCommunityAuthority(db,user,input==null?null:input.communityId());
         if(input==null || input.authorityId()==null || input.communityId()==null || input.seats()==null || input.seats().size()!=7 ||
            input.guardianCredentialId()==null || input.guardianPublicKey()==null)
             throw new ResponseStatusException(BAD_REQUEST,"Exactly seven seats and one separate guardian required");

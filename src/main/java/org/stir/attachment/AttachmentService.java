@@ -1,5 +1,6 @@
 package org.stir.attachment;
 
+import org.springframework.context.annotation.Profile;
 import es.idynamicsax.idax.security.CurrentUser;
 import es.idynamicsax.idax.tenant.TenantContext;
 import java.io.InputStream;
@@ -26,6 +27,7 @@ import static org.springframework.http.HttpStatus.*;
  * service is the ONLY thing allowed to read or write them - nothing else ever gets bucket access.
  */
 @Service
+@Profile("!governed-verifier")
 public class AttachmentService {
     private static final Logger log = LoggerFactory.getLogger(AttachmentService.class);
     private static final long MAX_LISTING_PHOTO_BYTES = 8L * 1024 * 1024;
