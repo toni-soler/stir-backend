@@ -147,8 +147,20 @@ public class FulfilmentService {
                 + "when 'INITIATOR_TASKS' then 2 else 3 end, id",
             (rs, i) -> obligation(rs, actor, events.getOrDefault(uuid(rs, 1), List.of())), tenant, agreementId);
         var attemptList = attempts.list(tenant, agreementId);
+        // Cases about this Agreement and the corrections they produced (AGREEMENT_CASES.md), so a board can
+        // show each next to its obligation. Never folded into an obligation's own status.
+        var cases = jdbc.query("select id,obligation_id,claim,status from stir.agreement_case where tenant_id=? and agreement_id=? order by created_at",
+            (rs, i) -> new CaseRef(uuid(rs, 1), uuid(rs, 2), rs.getString(3), rs.getString(4)), tenant, agreementId);
+        var corrections = jdbc.query("select r.id,r.case_id,r.kind,r.status,r.ostris_transaction_id,r.committed_sequence,r.committed_at "
+                + "from stir.agreement_case_remedy r where r.tenant_id=? and r.agreement_id=? order by r.created_at",
+            (rs, i) -> new CorrectionRef(uuid(rs, 1), uuid(rs, 2), rs.getString(3), rs.getString(4), uuid(rs, 5), (Long) rs.getObject(6), instant(rs, 7)),
+            tenant, agreementId);
+        var containment = jdbc.query("select case_id, until_at from stir.agreement_case_containment where tenant_id=? and agreement_id=? "
+                + "and lifted_at is null and until_at > now() order by applied_at limit 1",
+            (rs, i) -> new ContainmentRef(uuid(rs, 1), instant(rs, 2)), tenant, agreementId);
         return new FulfilmentView(agreementId, snapshot.digest(), headDigest(tenant, agreementId, snapshot.digest()),
-            agreement.economicPhase(), obligations, attemptList.isEmpty() ? null : attemptList.getLast());
+            agreement.economicPhase(), obligations, attemptList.isEmpty() ? null : attemptList.getLast(),
+            cases, corrections, containment.isEmpty() ? null : containment.getFirst());
     }
 
     private static ObligationView obligation(ResultSet rs, UUID actor, List<EventView> events) throws SQLException {
@@ -201,6 +213,7 @@ public class FulfilmentService {
         UUID tenant = tenant(), actor = actor(user);
         var agreement = partyAgreement(tenant, agreementId, actor, false);
         ensureObligations(tenant, agreement);
+        org.stir.cases.CaseService.requireNotContained(jdbc, tenant, agreementId);
         if (request == null) throw new ResponseStatusException(BAD_REQUEST, "Amendment required");
         String reason = request.reason() == null ? "" : request.reason().trim();
         if (reason.isEmpty() || reason.length() > 2000) throw new ResponseStatusException(BAD_REQUEST, "Say why the agreement changes (up to 2000 characters)");
@@ -260,6 +273,7 @@ public class FulfilmentService {
         // Serialize amendment decisions on one Agreement; the unique index is the final word.
         var agreement = partyAgreement(tenant, agreementId, actor, true);
         var proposal = proposed(tenant, agreementId, amendmentId);
+        org.stir.cases.CaseService.requireNotContained(jdbc, tenant, agreementId);
         if (actor.equals(proposal.get("proposer_user_id"))) throw new ResponseStatusException(CONFLICT, "Only the other party may accept this amendment");
         var validUntil = (Timestamp) proposal.get("valid_until");
         if (validUntil != null && Instant.now().isAfter(validUntil.toInstant()))
@@ -416,7 +430,11 @@ public class FulfilmentService {
                                  String description, LocalDate fulfilBy, String fulfilmentMode, String status, UUID supersededByAmendmentId,
                                  String yourRole, List<EventView> events) {}
     public record FulfilmentView(UUID agreementId, String snapshotDigest, String headDigest, String economicPhase,
-                                 List<ObligationView> obligations, ExecutionAttemptRecorder.AttemptView lastExecutionAttempt) {}
+                                 List<ObligationView> obligations, ExecutionAttemptRecorder.AttemptView lastExecutionAttempt,
+                                 List<CaseRef> cases, List<CorrectionRef> corrections, ContainmentRef containment) {}
+    public record CaseRef(UUID id, UUID obligationId, String claim, String status) {}
+    public record CorrectionRef(UUID id, UUID caseId, String kind, String status, UUID ostrisTransactionId, Long committedSequence, Instant committedAt) {}
+    public record ContainmentRef(UUID caseId, Instant until) {}
     public record NewObligation(String kind, String description, LocalDate fulfilBy, String fulfilmentMode) {}
     public record AmendmentRequest(String baseDigest, List<UUID> replaces, List<NewObligation> obligations, String reason, Instant validUntil) {}
     public record AmendmentView(UUID id, UUID proposerUserId, String baseDigest, String reason, Instant validUntil, String status,

@@ -1,5 +1,9 @@
 # Changelog
 
+## Agreement cases
+
+Reviewing an unfulfilled obligation without judging the person (`stir-doc/AGREEMENT_CASES.md`). V24 adds a STIR-owned reviewer roster set by community authority (registered in osTRIS as the community resolution authority), cases opened by the party an obligation is owed to, append-only evidence with an optional reviewers-only visibility, an append-only timeline, and three separate decision types - finding about the effect, attribution of conduct, sanction (a warning only) - each with its own appeal window and an appeal decided by a reviewer other than its author. Containment pauses an Agreement's execution and amendments, never a person. A final finding can order a full reversal of the community-unit exchange: an adjudicated osTRIS `REVERSAL` on a `FINAL_DISPUTE_RESOLUTION` basis, signed by the reviewers' own keys. Nothing is automatic. `GET /obligations` adds `cases`, `corrections` and `containment`; `GET /api/stir/instance` reports `agreementCasesVersion: 1`; notifications `CASE_OPENED` and `CASE_UPDATED`. Requires the osTRIS resolution surface (`claude/dispute-resolution-contract`).
+
 ## Agreement fulfilment
 
 Per-obligation fulfilment for every Agreement (`stir-doc/AGREEMENT_FULFILMENT.md`). V23 adds obligations derived from the snapshot (never rewriting it), typed append-only declarations by each party, amendments that name what they replace and chain to the snapshot, and a persisted, classified record of every economic execution attempt (`COMMITTED`, `EXPOSURE_REFUSAL`, `AUTHORISATION_INCOMPLETE`, `INVALID_DESCRIPTION`, `IMPLEMENTATION_FAULT`, `UNKNOWN`). `/economic/me` adds `availableCapacity`; profiles add an opt-in, score-free fulfilment history. New permission `stir.agreements.fulfil`; `GET /api/stir/instance` reports `agreementFulfilmentVersion: 1`. The four new tables are RLS-scoped and covered by the governed-state audit trigger.
