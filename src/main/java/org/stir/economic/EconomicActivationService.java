@@ -100,9 +100,18 @@ public class EconomicActivationService {
     }
 
     public record MarketplaceEconomicView(UUID communityId, String communityName, UUID unitId, String unitCode, int unitScale) {}
-    public record ParticipantEconomicView(UUID communityId, UUID unitId, UUID accountId, String balanceProjection, String creditFloor) {
+    /** availableCapacity: how far the balance may still fall before the credit floor, never negative -
+     * the same figure as osTRIS's CreditPosition.availableNegativeExposure(), so no client has to
+     * derive it (AGREEMENT_FULFILMENT.md, "Crédito"). Null when osTRIS did not report both figures. */
+    public record ParticipantEconomicView(UUID communityId, UUID unitId, UUID accountId, String balanceProjection, String creditFloor,
+                                          String availableCapacity) {
         static ParticipantEconomicView of(ParticipantEconomicBinding binding, OstrisClient.AccountView account) {
-            return new ParticipantEconomicView(binding.communityId, binding.unitId, binding.accountId, account.balanceProjection(), account.creditFloor());
+            return new ParticipantEconomicView(binding.communityId, binding.unitId, binding.accountId, account.balanceProjection(), account.creditFloor(),
+                capacity(account.balanceProjection(), account.creditFloor()));
+        }
+        static String capacity(String balance, String floor) {
+            try { return new java.math.BigInteger(balance).subtract(new java.math.BigInteger(floor)).max(java.math.BigInteger.ZERO).toString(); }
+            catch (NullPointerException | NumberFormatException ex) { return null; }
         }
     }
     /** Only ever returned from activate() itself - the ONE moment a caller needs to know "this

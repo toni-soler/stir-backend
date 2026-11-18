@@ -85,6 +85,15 @@
       "resourceKey": "stir.agreements"
     },
     {
+      "actionKey": "fulfil",
+      "apiPath": "/api/stir/tenants/{tenantId}/agreements",
+      "code": "stir.agreements.fulfil",
+      "description": "record fulfilment confirmations on one's own agreements and propose, accept or reject amendments to them",
+      "fieldKey": null,
+      "labelKey": "stir.permissions.agreementsFulfil",
+      "resourceKey": "stir.agreements"
+    },
+    {
       "actionKey": "read",
       "apiPath": "/api/stir/tenants/{tenantId}/economic",
       "code": "stir.economic.read",

@@ -36,7 +36,7 @@ class TradeServiceTest {
         marketplaceBindings = mock(MarketplaceEconomicBindingRepository.class);
         ostris = mock(OstrisClient.class);
         activation = new EconomicActivationService(marketplaceBindings, participantBindings, mock(ParticipantProfileRepository.class), ostris);
-        service = new TradeService(trades, agreements, offers, snapshots, participantBindings, activation, ostris, mock(NotificationService.class));
+        service = new TradeService(trades, agreements, offers, snapshots, participantBindings, activation, ostris, mock(NotificationService.class), mock(ExecutionAttemptRecorder.class));
 
         payerUser = mock(CurrentUser.class); when(payerUser.getUserId()).thenReturn(payer);
         payeeUser = mock(CurrentUser.class); when(payeeUser.getUserId()).thenReturn(payee);
