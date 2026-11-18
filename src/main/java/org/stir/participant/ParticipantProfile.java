@@ -14,6 +14,8 @@ public class ParticipantProfile {
     @Column(length=160) public String location;
     @Column(name="avatar_attachment_id") public UUID avatarAttachmentId;
     @Column(nullable=false) public boolean active;
+    /** Opt-in contextual fulfilment history (AGREEMENT_FULFILMENT.md); changed only through FulfilmentService.share. */
+    @Column(name="share_fulfilment_history", nullable=false) public boolean shareFulfilmentHistory;
     @Version public long version;
     @Column(name="created_at", nullable=false) public Instant createdAt;
     @Column(name="updated_at", nullable=false) public Instant updatedAt;

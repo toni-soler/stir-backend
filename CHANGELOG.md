@@ -1,5 +1,9 @@
 # Changelog
 
+## Agreement fulfilment
+
+Per-obligation fulfilment for every Agreement (`stir-doc/AGREEMENT_FULFILMENT.md`). V23 adds obligations derived from the snapshot (never rewriting it), typed append-only declarations by each party, amendments that name what they replace and chain to the snapshot, and a persisted, classified record of every economic execution attempt (`COMMITTED`, `EXPOSURE_REFUSAL`, `AUTHORISATION_INCOMPLETE`, `INVALID_DESCRIPTION`, `IMPLEMENTATION_FAULT`, `UNKNOWN`). `/economic/me` adds `availableCapacity`; profiles add an opt-in, score-free fulfilment history. New permission `stir.agreements.fulfil`; `GET /api/stir/instance` reports `agreementFulfilmentVersion: 1`. The four new tables are RLS-scoped and covered by the governed-state audit trigger.
+
 ## Upstream 0.4 baseline
 
 The backend now compiles against the public `es.idynamicsax.idax:idax-core:0.4.0` artifact from the public IDAX Maven repository. No STIR domain or HTTP contract changed as part of this dependency alignment.

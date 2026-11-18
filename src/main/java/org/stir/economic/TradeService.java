@@ -47,16 +47,19 @@ public class TradeService {
     private final EconomicActivationService activation;
     private final OstrisClient ostris;
     private final NotificationService notifications;
+    private final ExecutionAttemptRecorder attempts;
     private final SecureRandom random = new SecureRandom();
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Logger log = LoggerFactory.getLogger(TradeService.class);
-    static final String INTENT_MISMATCH = "EXECUTION_INTENT_MISMATCH: the osTRIS transaction linked to this agreement does not match "
+    static final String INTENT_MISMATCH_CODE = "EXECUTION_INTENT_MISMATCH";
+    static final String INTENT_MISMATCH = INTENT_MISMATCH_CODE + ": the osTRIS transaction linked to this agreement does not match "
         + "the agreed exchange; nothing was signed, committed or reported for it. Reconcile it before retrying";
 
     public TradeService(TradeRepository trades, AgreementRepository agreements, OfferRepository offers,
             AgreementSnapshotRepository snapshots, ParticipantEconomicBindingRepository participantBindings,
             EconomicActivationService activation, OstrisClient ostris,
-            NotificationService notifications) {
+            NotificationService notifications, ExecutionAttemptRecorder attempts) {
+        this.attempts = attempts;
         this.trades = trades; this.agreements = agreements; this.offers = offers; this.snapshots = snapshots;
         this.participantBindings = participantBindings; this.activation = activation; this.ostris = ostris;
         this.notifications = notifications;
@@ -163,12 +166,18 @@ public class TradeService {
     }
 
     public TradeView commit(CurrentUser user, UUID agreementId) {
-        UUID tenant = tenant();
-        var agreement = partyAgreement(tenant, agreementId, actor(user));
+        UUID tenant = tenant(), actor = actor(user);
+        var agreement = partyAgreement(tenant, agreementId, actor);
         var trade = requireTrade(tenant, agreementId);
         // Even an already-committed trade is re-checked before it is reported as this Agreement's execution.
         var status = ostris.transaction(trade.transactionId);
-        requireIntent(tenant, agreement, trade, status);
+        try { requireIntent(tenant, agreement, trade, status); }
+        catch (ResponseStatusException ex) {
+            if (!"COMMITTED".equals(trade.executionState))
+                attempts.failed(tenant, agreementId, trade.id, actor, ExecutionOutcome.IMPLEMENTATION_FAULT, INTENT_MISMATCH_CODE,
+                    ex.getStatusCode().value(), "The osTRIS transaction linked to this agreement does not match the agreed exchange");
+            throw ex;
+        }
         if ("COMMITTED".equals(trade.executionState)) return TradeView.of(trade);
         // Older STIR versions could mark a still-PROPOSED osTRIS transaction REJECTED after a
         // failed HTTP call. Reconcile that legacy local state before deciding whether to retry.
@@ -184,6 +193,9 @@ public class TradeService {
             trade.protocolDigest = receipt.protocolDigest(); trade.committedAt = receipt.committedAt();
             agreement.economicPhase = "COMMITTED";
         } catch (StirOstrisException ex) {
+            // Every failed attempt is recorded and classified (AGREEMENT_FULFILMENT.md) before the
+            // caller sees it; recording never changes what the caller is told.
+            attempts.failed(tenant, agreementId, trade.id, actor, ExecutionOutcome.classify(ex.status, ex.code), ex.code, ex.status, ex.getMessage());
             // A timeout/rate limit/upstream failure does not say whether osTRIS committed. Its
             // commit endpoint is idempotent by transactionId, so keep the local proposal retryable
             // until a later commit() or sync() obtains osTRIS's authoritative status.
@@ -203,10 +215,13 @@ public class TradeService {
             // a verdict on the Agreement. Preserve the proposal for investigation/reconciliation.
             throw new ResponseStatusException(BAD_GATEWAY, ex.code + ": osTRIS commit contract/transaction could not be confirmed");
         } catch (org.springframework.web.client.ResourceAccessException ex) {
+            attempts.failed(tenant, agreementId, trade.id, actor, ExecutionOutcome.UNKNOWN, "OSTRIS_UNREACHABLE", null,
+                "osTRIS could not be reached; the commit outcome is unknown until synchronized");
             throw new ResponseStatusException(SERVICE_UNAVAILABLE,
                 "osTRIS commit outcome is unknown; retry or synchronize this exchange", ex);
         }
         trade.updatedAt = Instant.now(); trades.saveAndFlush(trade); agreements.saveAndFlush(agreement);
+        attempts.committed(tenant, agreementId, trade.id, actor, trade.committedSequence);
         notifications.create(tenant, agreement.payerUserId, "TRADE_COMMITTED", "AGREEMENT", agreementId);
         notifications.create(tenant, agreement.payeeUserId, "TRADE_COMMITTED", "AGREEMENT", agreementId);
         return TradeView.of(trade);

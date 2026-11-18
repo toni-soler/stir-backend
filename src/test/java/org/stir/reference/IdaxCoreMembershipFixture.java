@@ -9,10 +9,10 @@ import org.testcontainers.containers.PostgreSQLContainer;
 /** Minimal idax_core membership tables for tests. Column names and types match the vendored
  * idax-core V1 definitions for the columns STIR's community-authority check reads; the real RLS
  * policy on idax_core.tenant_user is not reproduced here (tenant_id is filtered explicitly). */
-final class IdaxCoreMembershipFixture {
+public final class IdaxCoreMembershipFixture {
     private IdaxCoreMembershipFixture() {}
 
-    static void install(PostgreSQLContainer<?> db) throws SQLException {
+    public static void install(PostgreSQLContainer<?> db) throws SQLException {
         try (Connection c = DriverManager.getConnection(db.getJdbcUrl(), db.getUsername(), db.getPassword());
              var s = c.createStatement()) {
             s.execute("create schema if not exists idax_core");
@@ -29,7 +29,7 @@ final class IdaxCoreMembershipFixture {
     }
 
     /** Inserts membership as superuser inside the test transaction (rolled back with it), then restores the caller role. */
-    static void member(Connection superuser, UUID tenant, UUID user, String role) throws SQLException {
+    public static void member(Connection superuser, UUID tenant, UUID user, String role) throws SQLException {
         String previousRole;
         try (var s = superuser.createStatement(); var r = s.executeQuery("select current_setting('role')")) {
             r.next(); previousRole = r.getString(1);
