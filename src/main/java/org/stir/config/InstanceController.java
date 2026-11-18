@@ -27,6 +27,10 @@ public class InstanceController {
     /** 1: per-obligation fulfilment, amendments, typed execution outcomes, credit capacity and
      * opt-in fulfilment history (AGREEMENT_FULFILMENT.md). 0 would mean "not available". */
     public static final int AGREEMENT_FULFILMENT_VERSION = 1;
+    /** 1: agreement cases - evidence with restricted access, finding, attribution, sanction and
+     * appeal as separate decisions, containment, and adjudicated reversals of the economic exchange through osTRIS
+     * (AGREEMENT_CASES.md). 0 would mean "not available". */
+    public static final int AGREEMENT_CASES_VERSION = 1;
     @Value("${stir.instance.version}") String stirVersion;
     @Value("${stir.instance.site-name}") String siteName;
     @Value("${stir.instance.public-base-url}") String publicBaseUrl;
@@ -40,10 +44,12 @@ public class InstanceController {
     public InstanceView instance() {
         List<String> locales = availableLocalesCsv.isBlank() ? List.of() : List.of(availableLocalesCsv.split(","));
         return new InstanceView(siteName, publicBaseUrl, supportContact, defaultLocale, locales, marketplaceDescription, logoUrl,
-            stirVersion, CATALOG_CONTRACT_VERSION, AgreementSnapshotService.SCHEMA_VERSION, AGREEMENT_FULFILMENT_VERSION);
+            stirVersion, CATALOG_CONTRACT_VERSION, AgreementSnapshotService.SCHEMA_VERSION, AGREEMENT_FULFILMENT_VERSION,
+            AGREEMENT_CASES_VERSION);
     }
 
     public record InstanceView(String siteName, String publicBaseUrl, String supportContact,
         String defaultLocale, List<String> availableLocales, String marketplaceDescription, String logoUrl,
-        String stirVersion, int catalogContractVersion, int externalContractSchemaVersion, int agreementFulfilmentVersion) {}
+        String stirVersion, int catalogContractVersion, int externalContractSchemaVersion, int agreementFulfilmentVersion,
+        int agreementCasesVersion) {}
 }

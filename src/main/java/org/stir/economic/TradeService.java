@@ -48,6 +48,7 @@ public class TradeService {
     private final OstrisClient ostris;
     private final NotificationService notifications;
     private final ExecutionAttemptRecorder attempts;
+    private final org.springframework.jdbc.core.JdbcTemplate jdbc;
     private final SecureRandom random = new SecureRandom();
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Logger log = LoggerFactory.getLogger(TradeService.class);
@@ -58,8 +59,8 @@ public class TradeService {
     public TradeService(TradeRepository trades, AgreementRepository agreements, OfferRepository offers,
             AgreementSnapshotRepository snapshots, ParticipantEconomicBindingRepository participantBindings,
             EconomicActivationService activation, OstrisClient ostris,
-            NotificationService notifications, ExecutionAttemptRecorder attempts) {
-        this.attempts = attempts;
+            NotificationService notifications, ExecutionAttemptRecorder attempts, org.springframework.jdbc.core.JdbcTemplate jdbc) {
+        this.attempts = attempts; this.jdbc = jdbc;
         this.trades = trades; this.agreements = agreements; this.offers = offers; this.snapshots = snapshots;
         this.participantBindings = participantBindings; this.activation = activation; this.ostris = ostris;
         this.notifications = notifications;
@@ -155,6 +156,8 @@ public class TradeService {
         var trade = requireTrade(tenant, agreementId);
         if (!"AWAITING_SIGNATURES".equals(trade.executionState))
             throw new ResponseStatusException(CONFLICT, "This exchange is no longer awaiting signatures (" + trade.executionState + ")");
+        // A case reviewer may pause the execution while a case about this Agreement is reviewed (AGREEMENT_CASES.md).
+        org.stir.cases.CaseService.requireNotContained(jdbc, tenant, agreementId);
         requireBinding(tenant, actor, "You");
         requireIntent(tenant, agreement, trade, ostris.transaction(trade.transactionId));
         UUID myAccount = actor.equals(agreement.payerUserId) ? trade.payerAccountId : trade.payeeAccountId;
@@ -179,6 +182,7 @@ public class TradeService {
             throw ex;
         }
         if ("COMMITTED".equals(trade.executionState)) return TradeView.of(trade);
+        org.stir.cases.CaseService.requireNotContained(jdbc, tenant, agreementId);
         // Older STIR versions could mark a still-PROPOSED osTRIS transaction REJECTED after a
         // failed HTTP call. Reconcile that legacy local state before deciding whether to retry.
         if ("REJECTED".equals(trade.executionState)) {

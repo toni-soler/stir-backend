@@ -104,6 +104,50 @@ public class OstrisClient {
         return post("/api/ostris/transactions/" + transactionId + "/commit", null, CommitReceipt.class);
     }
 
+    // --- Adjudicated corrections (AGREEMENT_CASES.md). osTRIS records the authority and the basis;
+    // the authority's own controllers still sign the governed payload, and osTRIS's commit gate is
+    // the only judge of whether the correction may commit. STIR never signs for anyone. ---
+    public ResolutionAuthority registerResolutionAuthority(UUID community, List<UUID> controllerIds, int threshold) {
+        return post("/api/ostris/communities/" + community + "/resolution-authorities",
+            Map.of("controllerIds", controllerIds.stream().map(UUID::toString).toList(), "threshold", threshold), ResolutionAuthority.class);
+    }
+    public ResolutionBasis recordResolutionBasis(UUID community, UUID basisId, String basisType) {
+        return post("/api/ostris/communities/" + community + "/resolution-bases",
+            Map.of("basisId", basisId.toString(), "basisType", basisType), ResolutionBasis.class);
+    }
+    public ResolutionBasis resolutionBasisFinality(UUID community, UUID basisId, String status) {
+        return post("/api/ostris/communities/" + community + "/resolution-bases/" + basisId + "/finality",
+            Map.of("status", status), ResolutionBasis.class);
+    }
+    public ProposalView proposeGoverned(UUID community, UUID unit, UUID transactionId, String purpose, List<Entry> entries,
+                                        Map<String, String> references, String basisType, UUID basisId) {
+        var body = new java.util.LinkedHashMap<String, Object>();
+        body.put("communityId", community.toString()); body.put("unitId", unit.toString()); body.put("transactionId", transactionId.toString());
+        body.put("purpose", purpose); body.put("entries", entries); body.put("references", references);
+        body.put("resolutionBasisType", basisType); body.put("resolutionBasisId", basisId.toString());
+        return post("/api/ostris/transactions/proposals", body, ProposalView.class);
+    }
+    public GovernanceSigningPayload governancePayload(UUID transactionId, UUID authorityId, int authorityVersion, String basisType,
+                                                      UUID basisId, List<UUID> coveredAccounts) {
+        String covered = String.join(",", coveredAccounts.stream().map(UUID::toString).toList());
+        return get("/api/ostris/transactions/" + transactionId + "/governance-payload?authorityId=" + authorityId
+            + "&authorityPolicyVersion=" + authorityVersion + "&resolutionBasisType=" + basisType + "&resolutionBasisId=" + basisId
+            + "&coveredAccounts=" + covered, GovernanceSigningPayload.class);
+    }
+    public void governanceAuthorize(UUID transactionId, UUID authorityId, int authorityVersion, String basisType, UUID basisId,
+                                    List<UUID> coveredAccounts, UUID credentialId, String signatureBase64url) {
+        var body = new java.util.LinkedHashMap<String, Object>();
+        body.put("authorityId", authorityId.toString()); body.put("authorityPolicyVersion", authorityVersion);
+        body.put("resolutionBasisType", basisType); body.put("resolutionBasisId", basisId.toString());
+        body.put("coveredAccounts", coveredAccounts.stream().map(UUID::toString).toList());
+        body.put("credentialId", credentialId.toString()); body.put("signatureBase64url", signatureBase64url);
+        post("/api/ostris/transactions/" + transactionId + "/governance-authorizations", body, Void.class);
+    }
+    public record ResolutionAuthority(UUID authorityId, int authorityVersion, int threshold, List<UUID> controllerIds,
+                                      long activationSequence, Long revocationSequence) {}
+    public record ResolutionBasis(UUID basisId, UUID communityId, String basisType, String status, Long finalitySequence) {}
+    public record GovernanceSigningPayload(String signingDomain, String governancePayload, String governanceDigest) {}
+
     // --- Device lifecycle: add/revoke a credential for the caller's ALREADY-ACTIVE controller,
     // never a new controller - see osTRIS's ProvisioningService.addCredential/revokeCredential. ---
     public CredentialAdded addCredential(UUID community, UUID controllerId, String publicKeyBase64url) {

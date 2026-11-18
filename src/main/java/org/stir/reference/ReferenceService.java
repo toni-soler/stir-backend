@@ -58,7 +58,7 @@ public class ReferenceService {
             throw new AccessDeniedException("Community is not bound to this tenant");
         return community;
     }
-    static void requireCommunityAuthority(JdbcTemplate db, CurrentUser user, UUID requestedCommunity) {
+    public static void requireCommunityAuthority(JdbcTemplate db, CurrentUser user, UUID requestedCommunity) {
         UUID actor = actor(user);
         UUID tenant = tenant();
         UUID community = requireBoundCommunity(db, requestedCommunity);
